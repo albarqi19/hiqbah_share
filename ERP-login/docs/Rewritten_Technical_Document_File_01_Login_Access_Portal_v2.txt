@@ -1,0 +1,864 @@
+# Rewritten Technical Document — File 01: Login & Access Portal (قسم بوابة الدخول)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[UI DESIGN UPDATE — June 2026]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Following the Figma UI/UX design phase (June 2026), four decisions were confirmed
+and are now reflected in this document:
+
+  1. UNIFIED LOGIN SURFACE (Mobile App): A single sign-in screen handles all
+     principal types. No employee/customer tab selection by the user. Routing to
+     the correct workspace is server-driven after authentication (see 6.1 step 7.5).
+
+  2. SMART IDENTITY FIELD: The mobile login accepts national ID, username, or
+     mobile number in a single adaptive field — the backend resolves the identity
+     type automatically.
+
+  3. RETURNING USER FLOW (Mobile): PIN (5-digit, numeric keypad) + Biometric
+     (Face ID / Touch ID) as fast-unlock for a still-valid refresh token on a
+     registered device. Full credentials required on first login and on new device.
+
+  4. Q1 RESOLVED: A customer (B2B/B2C) and an employee are separate user records
+     with separate user_type values, even if the same human. One human holding
+     both an employee account and a customer account would present different
+     credentials and be routed independently. (See Section 18.1 Q1 below.)
+
+Changes are marked inline with [UI-UPDATE] for traceability.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PURPOSE OF THIS FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file defines the **Authentication, Identity, and Access Portal** layer of the
+ERP system. It is the foundation that every other module depends on, because no
+business logic (inventory, production, QC, sales, accounting, integrations,
+dashboards) can be executed without first answering three questions:
+
+1. **Who is the user?** (Authentication)
+2. **Which tenant and branch are they acting in?** (Tenant/Branch Context Resolution)
+3. **What are they allowed to do?** (Authorization / RBAC)
+
+The file describes:
+
+- The categories of users the system must support (internal employees, sales reps,
+  B2B wholesale clients, B2C individuals, mystery shoppers, internal/external auditors).
+- The login surfaces and methods (email+password, mobile OTP, employee PIN,
+  QR-based branch login, biometric login on mobile apps).
+- Role-Based Access Control (RBAC) with granular per-module verbs
+  (View / Create / Edit / Approve / Delete).
+- Session auditing, device-based security approvals, security posture indicators,
+  and invitation-based onboarding.
+- A platform-level user-monitoring dashboard.
+
+This is **not** a UI specification. It is the contract that the backend
+Authentication Service, Authorization Service, Tenant Access Service, Session
+Service, and Audit Log Service must implement so that all downstream modules can
+trust the request context.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — CLEAN TECHNICAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Login & Access Portal is a **SaaS-grade Identity & Access Management (IAM)
+subsystem** that:
+
+- Authenticates principals (humans and, in future, machine/integration principals)
+  using multiple credential types.
+- Resolves the tenant and branch context for every authenticated session.
+- Issues short-lived access tokens and refresh tokens, scoped by tenant, branch,
+  role, and device.
+- Enforces RBAC at the backend service layer for every API call, never relying on
+  frontend route hiding alone.
+- Distinguishes between **Platform-level principals** (super admin, platform admin)
+  and **Tenant-level principals** (employees, customers, partners) with strict
+  separation.
+- Logs every authentication event, session event, and authorization decision into
+  an immutable Audit Log.
+- Supports onboarding via cryptographically signed, time-bound invitation links
+  rather than manual account creation, and offers device approval, MFA, and
+  biometric unlock as adaptive security controls.
+
+The portal is the **single entry point** to the platform across Web, iOS, Android,
+station screens, and API consumers, and it MUST behave identically (same rules,
+same enforcement) across all of them.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — ORIGINAL BUSINESS INTENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The business intent expressed in the source document is:
+
+1. The ERP will be used by **very different categories of people** — internal
+   employees, wholesale customers, retail customers, mystery shoppers, auditors,
+   sales agents — and each needs a separate experience and a strict, narrow set of
+   permissions. Mixing them in one undifferentiated "user table with flags" will fail.
+2. Login should be **adaptive to context**: an accountant at a desk wants
+   email+password; a barista on a shared branch tablet wants PIN or QR; a mobile
+   user wants OTP or biometrics.
+3. Permissions should be **role-driven, not handcrafted per user**, to keep the
+   system manageable as it grows to many users, branches, and tenants.
+4. Security is non-negotiable: device approvals, activity logging, MFA, and a
+   visible security-posture indicator are required.
+5. Account creation should be **invitation-based**, not self-service for sensitive
+   roles, to prevent permission sprawl and unauthorized internal accounts.
+6. Administrators must have a **monitoring surface** for who is in the system,
+   who failed to log in, and which sessions are active.
+
+The author also expresses a strong, explicit warning: **without a strong permissions
+model from day one, the system will become chaotic.** This is correct and is treated
+as a binding architectural constraint in the rewrite below.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — BUSINESS LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 4.1 Triggers
+
+- A principal attempts to authenticate from Web, iOS, Android, station screen, or API.
+- An administrator (Platform or Tenant) creates/invites a new user.
+- A user requests password reset, OTP, or biometric enrollment.
+- A user attempts to log in from a previously unseen device.
+- A session expires, is revoked, or is forcibly terminated.
+
+SECTION 4.2 Preconditions
+
+Before any authentication can succeed:
+
+- The **tenant** must exist and be in an active subscription state (Active, Trial —
+  not Suspended/Cancelled). Exception: platform-level principals do not require a tenant.
+- The **user account** must exist and be Active (not Disabled, not Locked,
+  not Pending Invitation).
+- The **credential method** used must be enabled for that user's user-type
+  (e.g., B2C may not use Employee PIN).
+- For station-screen logins (QR + PIN), the **station device** must be registered
+  to the tenant and branch.
+
+SECTION 4.3 During the process
+
+1. Credentials are validated against hashed/secret stores (never plaintext).
+2. Anti-brute-force checks (rate limit per identity, per IP, per device) are applied.
+3. Tenant context is resolved:
+   - If the user belongs to exactly one tenant -> auto-select.
+   - If multiple -> return a tenant-selection step.
+   - Platform users skip tenant resolution; they receive a platform-scoped session.
+4. Branch context is resolved (one branch by default, or branch selector if user
+   has multiple).
+5. Device fingerprint is captured. If unknown -> enter **Device Approval** flow
+   (OTP / admin approval / MFA challenge) before issuing a full session.
+6. A session is created with explicit scope:
+   {user_id, tenant_id, branch_id, role_ids, device_id, source_interface, issued_at, expires_at}.
+7. Access token (short-lived, e.g. 15 min) and refresh token (longer, revocable)
+   are issued.
+8. Login event, device, IP, geolocation (approximate), and source interface are
+   written to the Audit Log.
+
+SECTION 4.4 Post-process
+
+- The session is now usable for API calls.
+- Every subsequent API call MUST be re-validated against (tenant active,
+  subscription active, feature flag enabled, user not disabled, role still grants
+  required permission, branch still valid).
+- The dashboard rendered to the user is determined **server-side** based on roles,
+  not by the client choosing.
+
+SECTION 4.5 What must be prevented
+
+- Cross-tenant token reuse (a token issued for Tenant A must be rejected if
+  presented against Tenant B's data).
+- Privilege elevation by client-supplied role headers (the server never trusts a
+  role claim sent by the client — it derives it from the session).
+- Direct activation of an account without invitation acceptance (no "active by
+  default" on creation).
+- Silent role changes (every role change must be logged and ideally require
+  approval for sensitive roles).
+- Same credentials used to access incompatible user-type areas (e.g., a B2C
+  customer attempting to access internal employee endpoints).
+
+SECTION 4.6 What requires approval
+
+- First login from a new device (auto-approval by OTP, or admin approval for
+  sensitive roles).
+- Assignment of high-privilege roles (Tenant Owner, Tenant Admin, Accountant
+  with approve rights).
+- Re-enabling a disabled or locked account.
+- Granting cross-branch access to a user.
+
+SECTION 4.7 What must be logged
+
+- Every successful login.
+- Every failed login attempt (with reason: bad password, locked, expired, wrong tenant).
+- Every logout (manual, timeout, forced).
+- Every token refresh.
+- Every device registration / approval / revocation.
+- Every role change, permission change, account enable/disable, password reset.
+- Every invitation sent, accepted, expired, revoked.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — SYSTEM MODULES / SECTIONS INVOLVED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Authentication Service
+- Authorization Service (RBAC)
+- Tenant Access Service
+- Branch Access Service
+- User Management Module
+- Role & Permission Management Module
+- Invitation Service
+- Device & Session Management Module
+- Audit Log Service
+- Notification Service (OTP delivery, security alerts, approval requests)
+- Platform Admin Console (Super Admin / Platform Admin dashboards)
+- Tenant Admin Console
+- Dashboard Routing Layer (per-role dashboard selection)
+- Mobile App Layer (iOS / Android — biometric and OTP login)
+- Station Screen Layer (QR + PIN login)
+- Integration Identity Layer (future — API keys, service accounts)
+- Security Monitoring Dashboard
+- WorkspaceRoutingService [UI-UPDATE] — resolves destination workspace from
+  user_type + role_ids after authentication
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — WORKFLOW / PROCESS LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 6.1 Workflow A — Standard Login
+(Web: Email+Password / Mobile: Smart Identity Field + Password or OTP)
+
+[UI-UPDATE] The login entry point is a UNIFIED surface on mobile. The user does
+not select "employee" or "customer" — the backend resolves this from the matched
+account's user_type after credential verification (step 7.5 below).
+
+| # | Step | Role | Input | Action | Output | Validation | Status Change | Inventory Impact | Audit |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Submit credentials | Any user | identity (national ID / username / email / mobile) + password | POST /auth/login | Candidate identity | Format, rate limit | — | None | Attempt logged |
+| 2 | Verify credentials | Auth Service | hashed password compare | Validate | OK / Fail | Bcrypt/Argon2; lockout after N failures | Account -> Locked if N exceeded | None | Success/fail logged |
+| 3 | Resolve tenant | Tenant Access Service | user_id | Look up memberships | tenant_id (or selection list) | Tenant must be Active | — | None | Tenant context resolved |
+| 4 | Check subscription | Subscription Service | tenant_id | Validate plan status | Allow / Deny | Plan = Active or Trial | — | None | Logged if denied |
+| 5 | Resolve branch | Branch Access Service | user_id, tenant_id | Look up assignments | branch_id (or selection) | Branch must be Active | — | None | Branch context resolved |
+| 6 | Device check | Session Service | device fingerprint | Match known devices | Known / Unknown | If unknown -> branch to 6.2 | — | None | Device check logged |
+| 7 | Issue tokens | Session Service | session scope | Create session, issue JWT + refresh | Tokens | Sign with rotating key | Session -> Active | None | Session created |
+| 7.5 | Detect account type & route | WorkspaceRoutingService + AuthorizationService | user_type, role_ids | Resolve principal class (TENANT_EMPLOYEE / B2B_CUSTOMER / B2C_CUSTOMER / AUDITOR / etc.) and select destination workspace | routing_decision {workspace: BACK_OFFICE or CUSTOMER_PORTAL or RESTRICTED} | Derived server-side from user_type + roles; client never selects or influences this step | — | None | Routing decision logged |
+| 8 | Load dashboard | Dashboard Router | role_ids | Compute dashboard config | Dashboard payload | Server-side only | — | None | — |
+
+[UI-UPDATE — UNIFIED SURFACE NOTE]
+The login surface on mobile (iOS/Android) is a single screen for all principals.
+The system does NOT ask the user to declare "I am an employee" or "I am a customer".
+After credentials are verified (step 2), the server determines the principal's
+user_type and routes them to the correct workspace at step 7.5.
+
+This is surfaced to the user as a brief transition screen ("Preparing your
+workspace — verifying your account type") before the destination workspace loads.
+This replaces any client-side user-type tab selection. The unified surface does
+NOT weaken isolation: separation is enforced by user_type policy + server-side
+routing, not by UI selection.
+
+On Web (back-office), the login URL remains /login (internal) vs /portal
+(customers) as separate routes, preserving an additional layer of separation.
+
+SECTION 6.2 Workflow B — New Device Approval
+
+| # | Step | Role | Input | Action | Output | Validation | Status Change | Audit |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Detect unknown device | Session Service | fingerprint | Compare to device registry | Unknown | — | Session pending | Logged |
+| 2 | Issue challenge | Auth Service | user contact | Send OTP via SMS/email; for sensitive roles, send admin approval request | Challenge_id | Rate limit OTP issuance | — | Challenge logged |
+| 3 | Submit OTP / receive admin approval | User / Admin | OTP / approval | Validate | OK / Fail | TTL <= 10 min; single-use | — | Approval logged |
+| 4 | Register device | Session Service | device fingerprint, label | Persist | Device record | Tenant-scoped | Device -> Approved | Logged |
+| 5 | Resume login | Session Service | — | Continue from step 7 of 6.1 | Tokens | — | Session -> Active | Session created |
+
+SECTION 6.3 Workflow C — Mobile OTP Login
+
+1. User enters phone number on iOS/Android app.
+2. Backend rate-limits and dispatches OTP via SMS provider (integration).
+3. User submits OTP within TTL.
+4. Same tenant/branch/device flow as 6.1 from step 3 onward.
+5. Push notification token is registered to the session for future notifications.
+
+SECTION 6.4 Workflow D — Returning User Fast Unlock (PIN + Biometric on Mobile)
+
+[UI-UPDATE] This workflow replaces the earlier generic "Employee PIN Login" for
+the mobile surface. PIN and biometric are fast-unlock mechanisms for a still-valid
+refresh token on a registered device — not primary authentication factors.
+
+1. On first launch after full login, user is prompted to set a PIN (5 digits,
+   numeric). Optionally enroll biometric (Face ID / Touch ID).
+2. On subsequent launches, the returning-user screen is shown with the user's
+   avatar/initial, greeting ("Welcome back, [Name]"), PIN keypad, and a biometric
+   button. The user does NOT re-enter email/identity.
+3. PIN is validated server-side against the registered device session. Biometric
+   is validated locally by the OS; the app then presents an attestation to the
+   server. If the refresh token is still valid, a new access token is issued.
+4. PIN is NOT a substitute for a password. It is a fast unlock on top of a device
+   previously authenticated by full credentials.
+5. Session issued from PIN/biometric has the same role scope as the original
+   session but with a reduced TTL (e.g., 30 minutes idle timeout).
+6. If the refresh token is expired or revoked, the PIN screen is bypassed and
+   full credentials are required.
+7. "Use password instead" link is always visible on the returning-user screen.
+8. "Sign in to a different account" link allows switching identity.
+
+SECTION 6.5 Workflow E — Station Screen QR Login
+
+1. The station screen displays a rotating QR code (signed, short TTL ~30s).
+2. Employee scans QR with their authenticated mobile app.
+3. Mobile app POSTs an approval to the backend including the QR token.
+4. Backend matches the QR session to the employee and pushes a session to the
+   station for that employee.
+5. Employee additionally enters PIN on the station to confirm.
+6. Station session has explicit branch scope and is auto-terminated on idle or
+   shift end.
+
+SECTION 6.6 Workflow F — Invitation-Based Onboarding
+
+1. Tenant Admin (or Platform Admin) creates an invitation:
+   {email/phone, tenant_id, branch_id(s), role_ids, expiry, single_use_token}.
+2. Notification Service sends the invite via email/SMS.
+3. Invitee opens link -> identity verified -> sets password / MFA -> account Active.
+4. Token is consumed and cannot be reused.
+5. If expired or revoked, the link returns an error and audit logs the attempt.
+
+SECTION 6.7 Workflow G — Forced Logout / Token Revocation
+
+1. Admin or system triggers revocation (role removed, account disabled, device lost).
+2. Refresh token is invalidated server-side; access token blacklist is updated.
+3. All active sessions for the user are listed and terminated; push channels revoked.
+4. User receives a security notification (if reachable).
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — DATA REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each authentication and authorization record must carry:
+
+- tenant_id (nullable only for platform-level principals)
+- user_id
+- user_type (enum: PLATFORM_ADMIN, TENANT_EMPLOYEE, SALES_REP, B2B_CUSTOMER,
+  B2C_CUSTOMER, MYSTERY_SHOPPER, AUDITOR, INTEGRATION_PRINCIPAL)
+- role_ids[] (tenant-scoped)
+- permission_ids[] (effective, computed from roles + overrides)
+- branch_ids[] (assignments)
+- device_id and device fingerprint
+- source_interface (WEB | IOS | ANDROID | STATION | API | INTEGRATION)
+- session_id, issued_at, expires_at, last_activity_at, revoked_at
+- ip_address, approximate geo_location, user_agent
+- auth_method (PASSWORD | OTP | PIN | QR | BIOMETRIC | SSO | API_KEY)
+- mfa_satisfied (boolean)
+- security_level (computed: STRONG | MEDIUM | WEAK)
+- invitation_id (for onboarding records)
+- approval_id (for sensitive role / new device flows)
+- audit_log_id (every action links here)
+- workspace_routing [UI-UPDATE] (BACK_OFFICE | CUSTOMER_PORTAL | RESTRICTED)
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — INVENTORY IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Direct impact: none. Authentication and access management do not move stock.
+
+Indirect / governance impact (must be enforced):
+
+- All inventory mutations must be rejected by the backend if the session is not
+  Active, the tenant is not Active, the subscription is not Active, the user
+  lacks the required permission, or the branch in the request does not match the
+  user's branch assignment.
+- Audit logs of inventory mutations must include user_id, session_id, device_id,
+  and source_interface resolved at this layer.
+- A failed authorization on an inventory call MUST NOT leak the existence of
+  records belonging to other tenants/branches (generic 403/404).
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — ACCOUNTING / COSTING IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Direct impact: none.
+
+Indirect impact:
+
+- All accounting actions inherit identity from this layer. The accountant role
+  must require strong authentication (password + MFA recommended for "Approve" verbs).
+- Sensitive accounting permissions (post journal, approve refund, void invoice,
+  sync to Qoyod) should be gated by MFA-satisfied sessions, not merely "logged-in".
+
+A future accounting design pass is required to define which permissions require
+step-up authentication. Marked as future accounting review.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — PERMISSIONS / RBAC CONSIDERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 10.1 Verbs
+
+Every protected resource exposes a standard verb set:
+VIEW, CREATE, EDIT, APPROVE, CANCEL, DELETE (soft), EXPORT, OVERRIDE, CLOSE,
+REOPEN, SYNC, MANAGE_DEVICES.
+
+SECTION 10.2 Scopes
+
+Every permission grant is qualified by {tenant_id, branch_id? | ALL, resource_type, verb}.
+Wildcards must be explicit and rare.
+
+SECTION 10.3 Suggested baseline roles (tenant-level)
+
+| Role | Scope | Typical permissions |
+|---|---|---|
+| Tenant Owner | Tenant-wide | All within tenant; cannot touch other tenants |
+| Tenant Admin | Tenant-wide | Manage users, roles, settings, integrations |
+| Operations Manager | Tenant or Branch | View/Edit operations modules; Approve production |
+| Production Manager | Branch | Create/Edit/Approve production & roasting |
+| Roaster | Branch | Create/Edit roasting batches only |
+| QC User | Branch | Create/Edit QC; Approve QC pass/fail |
+| Warehouse User | Branch | Receive, count, transfer, pick |
+| Sales User / Sales Rep | Tenant or assigned customers | View/Create sales orders for own customers |
+| Accountant | Tenant | Invoices, payments, accounting sync; Approve when granted |
+| Barista | Branch | Calibration, recipes, QC sensory |
+| B2B Customer | Self | View own orders, invoices, place orders |
+| B2C Customer | Self | Own orders only |
+| Mystery Shopper | Assigned tasks only | Submit visit reports; no access to operational data |
+| Auditor / Reviewer | Read-only across scope | VIEW + EXPORT only; never CREATE/EDIT/DELETE |
+| Integration Admin | Tenant | Manage integration credentials and mappings |
+
+SECTION 10.4 Hard rules
+
+- Deletion: hard deletes are not permitted for operational records. All "delete"
+  verbs are soft deletes with audit trail.
+- Override: any override verb requires (a) explicit permission, (b) mandatory
+  reason string, (c) audit log with before/after.
+- Auditors must never receive CREATE/EDIT/DELETE verbs anywhere. Global invariant.
+- Mystery Shoppers must not see data outside their assigned task. Enforced via
+  hard-coded user_type policy, not just absent role.
+- B2C/B2B customers must never be granted internal operational verbs.
+  user_type check precedes role check.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — BACKEND / API READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 11.1 Backend services required
+
+- AuthenticationService — credential verification, OTP issuance/validation,
+  PIN validation, QR session brokering, biometric attestation verification, SSO (future).
+- SessionService — session creation, refresh, revocation, device registry, push token registry.
+- AuthorizationService — permission evaluation; authorize(session, resource, verb, scope).
+- TenantAccessService — resolves tenant membership; enforces tenant scope.
+- BranchAccessService — resolves branch assignments.
+- RoleService — CRUD on roles and role-permission mappings (tenant-scoped).
+- InvitationService — create, validate, consume, expire invitations.
+- AuditLogService — append-only log of all auth/authz events.
+- NotificationService — OTP delivery, security alerts, approval requests.
+- RateLimitService — per-identity, per-IP, per-device throttling.
+- SecurityPostureService — computes Strong/Medium/Weak indicator.
+- WorkspaceRoutingService [UI-UPDATE] — resolves destination workspace from
+  user_type + role_ids after authentication; returns routing_decision to the
+  client; never accepts routing hints from the client.
+
+SECTION 11.2 APIs required (representative, not exhaustive)
+
+- POST /auth/login — accepts: identity (national ID, username, email, or mobile),
+  password. [UI-UPDATE: identity field is adaptive — backend resolves the identity
+  type; client sends raw string.]
+- POST /auth/otp/request, POST /auth/otp/verify
+- POST /auth/pin/verify [UI-UPDATE: used for returning-user fast-unlock on
+  registered mobile device; requires valid refresh token in session]
+- POST /auth/biometric/attest [UI-UPDATE: server verifies refresh token validity;
+  does not accept biometric data — only an attestation + device binding]
+- POST /auth/qr/initiate (station), POST /auth/qr/approve (mobile)
+- POST /auth/refresh, POST /auth/logout, POST /auth/logout-all
+- GET /auth/session (current session info)
+- GET /auth/workspace-routing [UI-UPDATE: returns the destination workspace for
+  the authenticated session; response drives the transition screen shown to user]
+- POST /tenants/select, POST /branches/select (when ambiguous)
+- POST /devices/approve, GET /devices, DELETE /devices/{id}
+- POST /invitations, GET /invitations/{token}, POST /invitations/{token}/accept
+- GET /admin/users, POST /admin/users, PATCH /admin/users/{id},
+  POST /admin/users/{id}/disable, POST /admin/users/{id}/reset-password
+- GET /admin/roles, POST /admin/roles, PATCH /admin/roles/{id}
+- GET /admin/audit-log (filtered by tenant/branch/user)
+- GET /admin/security/login-dashboard
+
+All APIs are versioned (/v1/...) and require explicit content-type and authentication
+except the unauthenticated handful (login, OTP request, invitation accept).
+
+SECTION 11.3 Server-side validations
+
+- Credential format and strength.
+- Rate limits.
+- Tenant active + subscription active.
+- User active + not locked.
+- Device known or in approval flow.
+- Role assignments still valid.
+- All input fields whitelisted; no role/permission/tenant claim accepted from client body.
+- [UI-UPDATE] Identity field: backend must resolve identity type (national ID /
+  username / email / mobile) from the raw string before credential lookup.
+  Do not expose which interpretation was used in error messages.
+
+SECTION 11.4 Database transactions
+
+- Session creation + audit log + device registration must be one transaction.
+- Role assignment + audit log = one transaction.
+- Invitation acceptance: create user + assign roles + consume token + audit =
+  one transaction.
+
+SECTION 11.5 Frontend-only logic that would be risky
+
+- Hiding admin menu items by checking role on the client only.
+- Storing role information in localStorage and trusting it.
+- Computing "what dashboard to show" purely client-side.
+- Caching permissions on the device without a TTL or invalidation channel.
+- [UI-UPDATE] Allowing the client to pass account type in the login request body
+  to influence workspace routing. The workspace is determined entirely from the
+  authenticated account's user_type server-side.
+
+SECTION 11.6 Failure scenarios to handle
+
+- Database unavailable during login -> return 503, do not partially create a session.
+- OTP provider failure -> fallback to alternate channel, never bypass.
+- Token signing key rotation -> both keys valid during rotation window.
+- Replay of revoked token -> reject; if presented multiple times, escalate to
+  security alert.
+- Time drift between station screen and server -> use server time only.
+- [UI-UPDATE] Identity type resolution failure -> return generic auth error; do
+  not reveal which lookup failed.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — SAAS READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Multi-tenant: every user record must carry tenant_id (or be marked PLATFORM).
+- Users in multiple tenants (future): build UserTenantMembership(user_id, tenant_id,
+  roles, status) from day one.
+- Tenant-scoped roles: roles are defined per tenant; never share IDs across tenants.
+- Tenant-scoped settings: password policy, MFA requirement, session TTL, device
+  approval policy — all configurable per tenant within platform-imposed minimums.
+- Subscription gating: MFA enforcement, SSO, audit-log export may be plan-gated.
+- Cross-tenant leak risks: invitation tokens must encode destination tenant;
+  admin console user search must always filter by tenant_id.
+- Numbering: session IDs, invitation IDs, device IDs -> globally unique (UUID).
+- Tenant configuration required: enabled login methods, password policy, MFA policy,
+  device approval policy, session timeouts, invitation TTL, allowed roles, branch list.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — WEB / iOS / ANDROID / STATION READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+| Surface | Login methods | Notes |
+|---|---|---|
+| Web (admin/back-office) | Email+Password, optional MFA, SSO (future) | Full admin and operational access. URL: /login |
+| Web (customer portal) | Email+Password, OTP | [UI-UPDATE] Separate URL (/portal). After authentication the server routes B2B/B2C principals to the customer portal workspace. Isolation enforced server-side by user_type policy, not by a user-selected tab. |
+| iOS / Android | Email+Password, National ID+Password, Mobile+Password, OTP, Biometric (Face ID / Touch ID / Android Biometric), PIN | [UI-UPDATE] UNIFIED LOGIN SURFACE — a single sign-in screen for all principals with a smart identity field (accepts national ID, username, email, or mobile). No employee/customer tab. After authentication the server routes to the correct workspace via WorkspaceRoutingService. Biometric and PIN are fast-unlock for a still-valid refresh token on a registered device; never a replacement for first-time login. Returning users see a dedicated screen with their avatar, name, and PIN/biometric entry. |
+| Station screens | QR + PIN (after device registration) | Station devices are registered objects; sessions auto-expire on idle and at shift end |
+| Future API consumers | API key / OAuth client credentials | Different identity type; same authorization service |
+
+SECTION 13.1 Permission consistency
+
+A permission denied on Web MUST also be denied on iOS, Android, station, and API.
+There is one authorization service. The clients only render hints; they never decide.
+
+SECTION 13.2 Source interface logging
+
+Every Audit Log entry must include source_interface so investigators can answer
+"did this transaction come from a phone in the warehouse or from an admin's laptop?".
+
+SECTION 13.3 Notifications
+
+Required across surfaces: security alert, pending approval request, invitation
+received/expiring, session terminated, MFA challenge pending.
+Channels: in-app web, iOS push, Android push, email, SMS.
+
+SECTION 13.4 Offline / poor connectivity
+
+- Authentication cannot be offline (tokens must be verified).
+- Station screens may keep a short grace period (60 seconds) if connectivity blips.
+- Mobile apps may keep a cached session valid until next refresh attempt, but
+  business-critical actions must require online verification.
+
+SECTION 13.5 Frontend-only logic risks (restated)
+
+- Role-based hiding as the only access control.
+- Tenant selection without server confirmation.
+- Branch context without server enforcement.
+- Dashboard content computed from claims without re-fetching from server.
+- [UI-UPDATE] Workspace selection based on a user-supplied "account type" parameter.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — INTEGRATION READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Identity providers (future): SSO via SAML/OIDC for enterprise B2B tenants.
+- OTP / SMS providers: pluggable Notification adapter per tenant.
+- Push providers: APNs (iOS), FCM (Android). Push tokens must be tenant-scoped
+  and revoked on logout.
+- Biometric: handled by OS keychain / Keystore; server only sees an attestation.
+  Biometric is NOT a server-side credential — server verifies an existing valid
+  refresh token.
+- API keys / Service accounts (future): tenant-scoped, with per-key permission
+  set, expiry, and rotation.
+- Integration with Qoyod and POS: authenticate into this ERP as integration
+  principals using API keys or OAuth client credentials.
+- Webhook signature verification (inbound): Audit Log captures with
+  source_interface = INTEGRATION.
+- Errors/mismatches: all return generic auth errors to client; detailed reasons
+  in Audit Log.
+- Manual fallback: if SSO or OTP provider is down, tenant admin may temporarily
+  enable password-based login (with audit + alert).
+- Security risks: leaked invitation tokens, leaked API keys, session replay,
+  device spoofing, credential stuffing — mitigations defined in Section 18.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 15 — DASHBOARD / REPORTING IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 15.1 Tenant Admin — Security Dashboard
+
+Active users count, logged-in users right now, failed login attempts (last 24h /
+7d), new devices pending approval, sessions per source interface, recent role/
+permission changes, recent invitations, accounts disabled/locked/pending,
+security posture distribution (Strong / Medium / Weak).
+
+SECTION 15.2 Platform Admin — Cross-Tenant Security Dashboard
+
+Tenants and their active session counts, tenants with anomalies, platform-level
+admin actions log, subscription/auth correlation (suspended tenants attempting login).
+
+SECTION 15.3 KPIs that other modules depend on
+
+- Did the user have an active session when they posted this inventory movement?
+- Which device performed an approval?
+- Did MFA cover the session that posted this accounting entry?
+
+Risk: counting "logins" as "active users" without deduplication — a user logging
+in on 3 devices is still one user.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 16 — DEVELOPER IMPLEMENTATION NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 16.1 Suggested entities
+
+- Tenant
+- User (id, tenant_id?, user_type, status, primary_email, primary_phone,
+  primary_national_id [UI-UPDATE], primary_username [UI-UPDATE],
+  security_level_cached, created_at, ...)
+- UserTenantMembership (user_id, tenant_id, status, joined_at)
+- UserBranchAssignment (user_id, tenant_id, branch_id, status)
+- Role (id, tenant_id, name, description, is_system)
+- Permission (id, resource, verb) — system-defined, not per-tenant
+- RolePermission (role_id, permission_id)
+- UserRole (user_id, tenant_id, role_id)
+- Credential (user_id, type, secret_hash, status, updated_at)
+  type: PASSWORD | PIN | BIOMETRIC_ANCHOR | API_KEY
+- Device (id, user_id, tenant_id, fingerprint, label, platform, status,
+  last_seen_at, pin_enrolled [UI-UPDATE], biometric_enrolled [UI-UPDATE])
+- Session (id, user_id, tenant_id, branch_id, device_id, source_interface,
+  auth_method, mfa_satisfied, workspace_routing [UI-UPDATE], issued_at,
+  expires_at, last_activity_at, revoked_at)
+- RefreshToken (id, session_id, hash, expires_at, rotated_to_id?)
+- OtpChallenge (id, user_id_or_phone, code_hash, purpose, expires_at,
+  consumed_at, attempts)
+- Invitation (id, tenant_id, target_email_or_phone, role_ids[], branch_ids[],
+  invited_by, token_hash, expires_at, status)
+- Approval (id, type, subject_id, requested_by, approver_user_id, status, decided_at)
+- AuditLogEntry (id, tenant_id?, user_id?, session_id?, action, resource,
+  before, after, source_interface, ip, geo, device_id, occurred_at) — append-only
+
+SECTION 16.2 Validation rules (highlights)
+
+- Password: length >= 12, complexity per tenant policy, breached-password check.
+- PIN: numeric, 5 digits [UI-UPDATE: 5 digits confirmed by keypad design], never
+  reused, rate-limited.
+- OTP: 6 digits, TTL <= 10 min, max 5 attempts, single-use.
+- Invitation: token TTL <= 7 days, single-use.
+- Session access token TTL: 15 min default.
+- Refresh token TTL: 14 days default; rotate on each use.
+- [UI-UPDATE] Identity field: max 100 chars; strip whitespace; normalize email
+  to lowercase; normalize phone to E.164; accept national ID as numeric string.
+
+SECTION 16.3 Status lifecycles
+
+- User: Pending Invitation -> Active -> Locked -> Disabled (soft) -> Reinstated
+- Session: Active -> Expired | Revoked
+- Device: Pending Approval -> Approved -> Revoked
+- Invitation: Sent -> Accepted | Expired | Revoked
+- Approval: Pending -> Approved | Rejected | Expired
+
+SECTION 16.4 Background jobs
+
+- Expire stale sessions and tokens.
+- Expire invitations and approvals.
+- Reset rate-limit counters.
+- Recompute security_level_cached after credential / MFA / device events.
+- Send "session about to expire" notifications (mobile).
+- Cleanup of dangling OTP challenges.
+
+SECTION 16.5 Event-driven hooks
+
+UserLoggedIn, UserLoggedOut, LoginFailed, NewDeviceDetected, RoleAssigned,
+RoleRevoked, InvitationSent, InvitationAccepted, AccountLocked, AccountReinstated,
+WorkspaceRouted [UI-UPDATE].
+
+SECTION 16.6 Multi-tenant query filtering
+
+- Every read query MUST include tenant_id from the session, never from the request body.
+- Use a query-level filter or row-level security.
+- Cross-tenant queries (platform admin only) require an explicit "platform context"
+  header AND a platform-admin role.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 17 — EDGE CASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- User belongs to multiple branches; logs in at HQ but session reused for an
+  action on a branch they were just removed from -> permission re-evaluated on
+  each call.
+- User's role revoked mid-workflow -> next save attempt rejects; client shows
+  "permission lost" message.
+- Same user on web and mobile simultaneously -> both sessions valid; revoking one
+  must not revoke the other unless "logout from all devices" is invoked.
+- User suspended while long-running export job is running -> job worker must
+  re-check session validity.
+- Tenant subscription expires mid-session -> API calls rejected with specific code.
+- Station screen left logged in after shift -> auto-idle timeout (10 min).
+- Mystery shopper tries to access a different tenant's data -> user_type check rejects.
+- Auditor tries to POST/PATCH via API -> backend rejects; audit logged as security event.
+- B2B customer's email already exists as employee in another tenant -> must NOT
+  merge. [UI-UPDATE: Q1 RESOLVED — separate user records with separate user_types.]
+- New device approval granted but user never completes login -> approval expires
+  and device is purged.
+- OTP delivered to stale phone number -> recovery via secondary channel + admin approval.
+- Invitation link forwarded to wrong person -> first-acceptor wins; admin can revoke.
+- Time skew on station screen -> server time is authoritative.
+- Biometric on shared device -> biometric must be tied to the original enrolling user.
+- Admin disables their own account -> blocked unless another active Tenant Owner exists.
+- Last Tenant Owner attempts to leave -> blocked.
+- Failed login from banned IP/region -> block + log; do not reveal if account exists.
+- Replay of old QR token -> rejected; QR tokens are single-use and short-lived.
+- PIN session on station + full session on web -> server treats each independently.
+- [UI-UPDATE] Identity string matches multiple accounts of different user_types
+  (e.g., same phone used as employee and B2B customer) -> resolve by full credential
+  set; if still ambiguous, prompt for additional input; never auto-select silently.
+- [UI-UPDATE] PIN unlock attempted with expired refresh token -> return "session
+  expired" and redirect to full credential screen; do not issue new session from
+  PIN alone.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 18 — QUESTIONS / AMBIGUITIES / RISKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 18.1 Identity model questions
+
+| # | Question | Status | Decision |
+|---|---|---|---|
+| Q1 | Is a B2B/B2C customer the same identity as a possible employee account, or are they separate users? | RESOLVED [UI-UPDATE] | Separate user records with separate user_type values, even if the same human. The unified login surface authenticates by identity+credential; the server routes based on the matched account's user_type. One human with both accounts will have two distinct logins. Keeps data isolation clean and workspace routing deterministic. |
+| Q2 | Can a single user belong to multiple tenants from day 1? | Open | Build UserTenantMembership now; expose only single-membership in UI. |
+| Q3 | Will Mystery Shoppers be per-tenant or a global pool? | Open | Recommendation: per-tenant identity. |
+| Q4 | Are auditors always internal, or can they be external? | Open | Affects identity model and data export controls. |
+| Q5 | Does the platform admin ever need to access tenant operational data? | Open | Recommendation: explicit "impersonation" feature with mandatory reason and tenant notification. |
+
+SECTION 18.2 Risks (classified)
+
+| ID | Risk | Class | Impact | Recommended fix |
+|---|---|---|---|---|
+| R1 | PIN-only login on station screens treated as primary credential | Critical | Account compromise on shared devices | PIN is fast-unlock only on registered device previously authenticated by full credentials. |
+| R2 | No explicit MFA requirement for sensitive roles | Critical | Accountants/admins compromised by phishing | Require MFA for Tenant Owner, Tenant Admin, Accountant-Approve, Integration Admin. |
+| R3 | Frontend-driven dashboard routing | High | Privilege bypass | Dashboard config and workspace routing are server-only. WorkspaceRoutingService is authoritative. |
+| R4 | Mystery shopper data isolation | High | Leak of operational data | Hard-coded user_type policy; isolated endpoints; no shared screens. |
+| R5 | Unified login surface blurring employee/customer boundary if routing is mishandled | High | Wrong workspace exposure, accidental privilege grants | [UI-UPDATE] Login surface is unified by design, but separation is enforced at two server-side layers: (1) user_type policy check precedes any role check; (2) server-driven workspace routing via WorkspaceRoutingService (Workflow A step 7.5) — client never chooses. Admin lists remain split by user_type. A customer principal must never be routed to or able to request a back-office workspace. |
+| R6 | Device approval flow not specified for sensitive roles | High | New-device takeover after credential leak | New device for Tenant Owner/Admin/Accountant requires admin approval, not just OTP. |
+| R7 | Activity log "location" field treated as authoritative | Medium | False positives in fraud detection | Treat geo as advisory only. |
+| R8 | Soft-delete vs hard-delete for users | Medium | Compliance balance | Default soft-delete; hard-delete is platform-admin-only. |
+| R9 | OTP via SMS only is fragile | Medium | Account lockout or compromise | Support SMS, email, authenticator app TOTP. |
+| R10 | Single-tenant user model in User.tenant_id | Medium | Painful refactor | Use UserTenantMembership from day one. |
+| R11 | QR login implementation details not specified | Medium | Insecure implementation | QR must be short-lived (<=30s), signed, single-use, bound to station device. |
+| R12 | "Security Level" algorithm not defined | Low | Inconsistent score | Define scoring rubric (MFA, password age, breached check, device count). |
+| R13 | Invitation link forwarded to wrong person | Medium | Unauthorized account creation | Bind invitation to specific email/phone and verify on acceptance. |
+| R14 | Audit log volume | Medium | Storage cost | Tier storage (hot vs cold); never sample auth events. |
+| R15 | Cross-tenant token reuse if tenant_id not embedded | Critical | Catastrophic data leak | Embed tenant_id in signed token AND re-verify server-side. |
+| R16 | No explicit rate-limit / lockout policy | High | Brute force feasibility | Define per-account, per-IP, per-device thresholds with progressive backoff. |
+| R17 | Last Tenant Owner can disable themselves | Medium | Tenant lockout | Block the operation; require transferring ownership first. |
+| R18 | Identity type ambiguity in unified smart field | Medium [UI-UPDATE] | Wrong account matched; wrong workspace routed | Backend resolves identity type deterministically with priority order; if ambiguous, prompt for additional input; never silently route to wrong account. |
+| R19 | PIN unlock with expired refresh token | Medium [UI-UPDATE] | User expects fast access but session is dead | Detect expired refresh token before showing PIN screen; redirect to full login immediately. |
+
+SECTION 18.3 Ambiguities to confirm
+
+- Exact list of user-types: confirm whether suppliers, delivery riders, café
+  customers paying via POS, station-only operators, and integration principals
+  are part of the same Login Portal or separate identity surfaces.
+- Whether sales reps can be promoted into multi-customer territories.
+- Whether B2B portal is web-only or also has a mobile app from day one.
+- Whether MFA is enforced platform-wide or configurable per tenant.
+- Whether SSO is on the roadmap and at which phase.
+- Exact composition of "Security Level" (R12).
+- [UI-UPDATE] Whether national ID (Huwiyya) is the primary identity field for
+  Saudi employees on mobile, or whether username/email takes precedence.
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 19 — ARTIFACT OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Text file: Rewritten_Technical_Document_File_01_Login_Access_Portal.txt
+- This is version 2 (June 2026), updated to reflect confirmed UI/UX design
+  decisions from the Figma design phase. All changes marked [UI-UPDATE].
+
+---
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 20 — RECOMMENDED NEXT STEP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before moving to the next file, confirm:
+
+1. User-type taxonomy (Q2-Q5; Q1 is RESOLVED).
+2. MFA mandatory for Tenant Owner, Tenant Admin, Accountant-Approve, Integration Admin.
+3. PIN is unlock-only on registered devices. [CONFIRMED by UI design]
+4. Dashboards are server-driven. [CONFIRMED — WorkspaceRoutingService added]
+5. Mystery Shoppers and Auditors are hard-isolated user-types.
+6. UserTenantMembership is built from day one.
+7. All auth/authz events go through one Audit Log with source_interface captured.
+8. Rate-limit / lockout thresholds (R16).
+9. Whether platform admins may "impersonate" tenant users and under what controls.
+10. Scope of SSO / TOTP / breach-password integration for v1.
+11. [UI-UPDATE] Identity field priority order (national ID vs email vs phone vs username).
+12. [UI-UPDATE] PIN digit count: 5 digits confirmed by keypad design; align
+    implementation with this (original spec said 6+).
+
+---
+
+End of file. Version 2 — June 2026.
+All changes from UI/UX design phase marked [UI-UPDATE].

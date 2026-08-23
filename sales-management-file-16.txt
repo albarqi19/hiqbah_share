@@ -1,0 +1,1462 @@
+================================================================================
+REWRITTEN TECHNICAL DOCUMENT — FILE 16
+Sales Management System — Web & Mobile App
+(قسم المبيعات في الموقع والتطبيق)
+================================================================================
+
+Prepared for: Software Developers, Backend Engineers, ERP Architects,
+              Product Managers, and Implementation Teams.
+
+Source file:  قسم_المبيعات_في_الموقع_والتطبيق.docx
+Document ID:  FILE-16
+Status:       Rewritten — Pending Developer Review
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PURPOSE OF THIS FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This file defines the Sales Management System — the sub-module that governs
+the front-facing sales operations layer: how sales representatives and sales
+staff capture orders, manage their customer portfolios, track commissions,
+monitor payment collection, handle leads, and monitor their own performance
+through role-scoped dashboards.
+
+This file is distinct from and complementary to File 06 (Advanced Roastery
+Order Workflow), which defines the backend order lifecycle — the multi-stage
+routing from sales review through accounting, payment, production, packaging,
+shipping, and closure. This file defines the sales-facing experience on top
+of that lifecycle: what the rep sees, what the sales manager sees, how
+commissions are calculated and disbursed, how leads progress to customers,
+and how the sales team is organized around customers and territories.
+
+Together, these two files define the complete sales operation:
+
+  FILE 06: Order Workflow
+    The backend pipeline. Stages, approvals, payment gates, allocation,
+    production trigger, shipping, closure. The contractual logic.
+
+  FILE 16 (this file): Sales Management
+    The sales layer. Rep experience, customer portfolio, lead pipeline,
+    commission engine, payment tracking, sales KPI dashboard, and
+    Sales Intelligence. The human-facing operational layer.
+
+The source file identifies one critical operational failure that this
+module must correct:
+
+  CRITICAL DESIGN PRINCIPLE (elevated from source):
+  Commissions must be fully automatic. The moment a customer payment
+  is confirmed in the Accounting Module, the commission status transitions
+  automatically from Pending to Approved to Paid — without manual
+  calculation, manual entry, or reliance on anyone remembering to
+  update a spreadsheet. Manual commission calculation is where most
+  small B2B businesses lose rep trust and make expensive errors.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — CLEAN TECHNICAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Sales Management System is a tenant-scoped, role-partitioned sales
+operations layer that:
+
+  1. Provides a structured ORDER CREATION interface for sales reps (mobile-
+     first) and sales staff (web), with customer selection, product line
+     entry, price resolution from the Pricing Module, rep assignment, and
+     commission rate capture — feeding directly into the order workflow
+     defined in File 06.
+
+  2. Provides a CUSTOMER PORTFOLIO system where each customer is assigned
+     to one or more sales reps with defined commission splits. A rep sees
+     only their own assigned customers (server-side scope enforcement).
+
+  3. Provides a LEAD PIPELINE for capturing and progressing prospective
+     customers from first contact through conversion to active customer.
+
+  4. Provides a fully AUTOMATED COMMISSION ENGINE that computes commission
+     amounts from order value and rate at order creation, and advances
+     commission status automatically when payment is confirmed in the
+     Accounting Module.
+
+  5. Provides PAYMENT TRACKING visibility for sales reps and sales managers
+     over outstanding B2B invoices — so the rep knows which customers to
+     follow up with and what is blocking their own commission from being paid.
+
+  6. Provides role-scoped SALES DASHBOARDS: a rep sees their own
+     performance, their own customers, their own commissions. A Sales
+     Manager sees all reps, all customers in their scope, and team-level
+     KPIs. Neither role sees data outside their scope through any surface.
+
+  7. Provides EVENT LINKAGE: upcoming trade events, product launches, and
+     marketing campaigns are surfaced in the sales context so reps can
+     connect leads and follow-ups to operational triggers.
+
+  8. Provides the foundation for SALES INTELLIGENCE (Phase 2): predictive
+     signals identifying customers likely to place an order soon, customers
+     at risk of churning, and cities or territories with highest growth
+     potential.
+
+The entire module is read-heavy. Its primary write operations are:
+order creation, lead creation and progression, customer assignment changes,
+and commission rate configuration. All financial transactions (invoices,
+receipts, payments) remain in the Accounting Module.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — ORIGINAL BUSINESS INTENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The author describes a business that relies heavily on field sales
+representatives to develop the B2B wholesale channel. The reps are the
+primary channel for acquiring new cafés and restaurants as customers, placing
+and following up on orders, and maintaining relationship quality in the field.
+
+Without a structured digital tool, the author identifies three common
+operational failures:
+
+  FAILURE 1: Commission disputes.
+    Reps do not trust manual commission calculations. They do not know
+    when an order qualifies for commission, how much they are owed, or
+    when it will be paid. This breeds distrust and reduces motivation.
+
+  FAILURE 2: Invisible payment collection risk.
+    B2B sales frequently involve deferred payment terms (Net 15, Net 30).
+    Without visibility, overdue invoices accumulate silently. By the time
+    the finance team notices, the rep has moved on and the relationship
+    is strained. Early visibility enables early follow-up.
+
+  FAILURE 3: Lost leads and forgotten follow-ups.
+    A rep meets a promising café owner at a trade show. Without a lead
+    capture tool, the contact information goes into a WhatsApp message
+    that is never actioned. Leads die in the noise.
+
+The module is designed to eliminate all three failures through automation
+(commissions), visibility (payment tracking), and structure (lead pipeline).
+
+The author also raises a forward-looking aspiration: Sales Intelligence —
+a system that tells reps which customers are most likely to order soon
+(based on their order frequency patterns), which are at risk of stopping
+(based on declining frequency), and which cities have the highest untapped
+potential. This is designated Phase 2 in this rewrite.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — BUSINESS LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  MODULE STRUCTURE
+──────────────────────
+
+  LAYER A — OPERATIONAL (Phase 1):
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Order Creation (mobile rep + web sales)                     │
+  │ Customer Portfolio (My Clients)                             │
+  │ Lead Pipeline (Leads Management)                            │
+  │ Client Assignment & Commission Split                        │
+  │ Commission Engine (automated)                               │
+  │ Payment Tracking                                            │
+  │ Sales Rep Dashboard                                         │
+  │ Sales Manager KPI Dashboard                                 │
+  │ Sales Rep Profile                                           │
+  │ Sales Notifications                                         │
+  │ Event Linkage                                               │
+  └─────────────────────────────────────────────────────────────┘
+
+  LAYER B — INTELLIGENCE (Phase 2):
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Predictive Order Timing (likely-to-order-soon signals)      │
+  │ Churn Risk Scoring (at-risk customers)                      │
+  │ Territory Growth Analysis (best cities for expansion)       │
+  │ Rep Performance Intelligence (coaching insights)            │
+  └─────────────────────────────────────────────────────────────┘
+
+
+4.2  ORDER CREATION
+────────────────────
+
+Order creation in this module is the entry point that feeds File 06's
+order workflow. It is NOT a separate order system — it is the sales
+team's interface to the order workflow.
+
+The interface differs by surface:
+  - MOBILE (rep): optimized for quick capture in the field (at a
+    café, on a call). Minimal taps, prefilled defaults, offline support.
+  - WEB (sales staff, admin): full form with all fields visible, useful
+    when creating bulk or complex orders at a desk.
+
+Order creation steps:
+
+  STEP 1 — CUSTOMER SELECTION
+    The user selects from their assigned customer pool.
+    For a rep: only customers assigned to them are shown.
+    For a sales staff / admin: all customers in their branch scope.
+    If the customer does not exist, an inline customer creation is
+    triggered. The new customer requires: Company Name, Contact Person,
+    Mobile, City, Business Type (Café / Restaurant / Store / Distributor /
+    Other), and rep assignment.
+
+    Critical backend rule: The server validates at order submission that
+    the selected customer is within the requesting user's assignment scope.
+    Client-side filtering is a UX convenience only.
+
+  STEP 2 — PRODUCT LINE ENTRY
+    The user adds order lines. Each line:
+      - Product selection from the active product catalog
+        (SKUs that are visible to this channel and tenant).
+      - Quantity.
+      - Price: resolved automatically by PriceResolutionService
+        (per File 10 — hierarchy: customer-specific → volume tier →
+        wholesale list → base price). The rep cannot change the price
+        directly. If a custom price is needed, it must be:
+        a. Configured as a customer-specific price in the Pricing Module
+           (with approval), OR
+        b. Flagged as a Special Price Request during order creation,
+           which puts the order in a "Pending Price Review" sub-state
+           before it enters the standard Sales Review stage.
+
+    The rep never sees the cost or margin of a product. They see only
+    the applicable selling price for their customer. Margin data is
+    restricted to Finance / Management roles.
+
+  STEP 3 — REP AND COMMISSION ASSIGNMENT
+    The rep creating the order is automatically assigned as the primary
+    rep (created_by_rep_id is set from the session). If commission split
+    applies (shared client with two reps), the system shows the split
+    configuration from the ClientAssignment record and the commission is
+    computed accordingly. The rep does not set the commission rate —
+    it is pulled from the rep's configured rate or the client-specific
+    override.
+
+  STEP 4 — ORDER NOTES AND PRIORITY
+    Optional notes field. Priority: Normal / Rush / Standing.
+    Rush orders require rep to provide a reason (free text, mandatory).
+
+  STEP 5 — SUBMISSION
+    Order submitted via POST /sales-orders (per File 06 API).
+    System generates order number (tenant-scoped sequence).
+    Status → New Rep Order.
+    CommissionRecord created with status = PENDING at this point,
+    linked to the order and the rep(s).
+    Sales team notified.
+
+  Offline buffering:
+    On mobile, if the rep submits while offline, the order is buffered
+    locally with an idempotency key and submitted when connectivity
+    is restored. The rep sees a "Pending sync" indicator.
+    The system rejects duplicate submissions of the same idempotency key.
+
+
+4.3  CUSTOMER PORTFOLIO (MY CLIENTS)
+──────────────────────────────────────
+
+Every customer is owned by one primary rep, with optional secondary reps
+defined in the ClientAssignment record (with percentage split for commission).
+
+Customer lifecycle states (sales perspective):
+  - PROSPECT (Lead not yet converted)
+  - ACTIVE (placed an order within the last N days; configurable per tenant)
+  - INACTIVE (no order within N days; alert generated)
+  - AT_RISK (declining order frequency detected; Phase 2 signal)
+  - CHURNED (no order within M days; configurable; Phase 2 classification)
+
+Customer record fields visible to a rep:
+  - Company Name, Contact Person, Mobile, City, Business Type
+  - Date of First Order, Date of Last Order
+  - Total Sales to Date (from their orders; read from SalesOrders)
+  - Active Order Count (open orders)
+  - Outstanding Balance (from AR Aging via Accounting Module)
+  - Days Since Last Order
+  - Assigned Rep(s) with commission split
+  - Customer Status (Active / Inactive)
+  - Notes log (free text entries by the rep; timestamped)
+
+What a rep CANNOT see:
+  - Other reps' customers.
+  - Cost / margin data.
+  - Internal accounting details beyond their own commission.
+  - Internal production or QC data.
+
+What a Sales Manager CAN see:
+  - All customers in their branch / territory scope.
+  - All reps' portfolios.
+  - Full sales data across all reps.
+  - AR aging per customer (linked to Accounting Module view).
+
+Server-side scope enforcement:
+  Every API call to customer data includes a scope filter derived
+  from the session:
+    - Rep: WHERE primary_rep_id = session.user_id
+            OR (EXISTS in ClientAssignment with user_id = session.user_id)
+    - Sales Manager: WHERE branch_id = session.branch_id
+    - Admin / CEO: no branch restriction (tenant_id filter only)
+  This filter is applied at the query layer, not the presentation layer.
+
+
+4.4  LEAD PIPELINE (LEADS MANAGEMENT)
+────────────────────────────────────────
+
+A Lead is a prospective customer who has not yet placed an order.
+Leads are created by reps in the field and by sales staff on web.
+
+Lead record:
+  - id, tenant_id, branch_id
+  - place_name, city, contact_person, mobile
+  - business_type (same enum as Customer)
+  - interest_level (LOW | MEDIUM | HIGH)
+  - source (FIELD_VISIT | TRADE_EVENT | REFERRAL | INBOUND | OTHER)
+  - linked_event_id (nullable; links to an Event from File 12 if the
+    lead was sourced from a trade show or product launch event)
+  - notes (free text; rep notes from the interaction)
+  - status (NEW | CONTACTED | SAMPLE_SENT | QUOTATION_SENT | CONVERTED
+            | LOST)
+  - created_by (rep user_id), created_at
+  - assigned_to (rep user_id; may differ from creator if reassigned)
+  - last_activity_at, next_followup_date
+  - converted_customer_id (populated when status = CONVERTED)
+  - loss_reason (populated when status = LOST; free text)
+
+Lead status lifecycle:
+  NEW → CONTACTED (rep made first contact)
+      → SAMPLE_SENT (product sample shared with the prospect)
+      → QUOTATION_SENT (a price quotation was shared)
+      → CONVERTED (lead accepted and became a Customer; order created)
+      → LOST (prospect declined; reason recorded)
+
+Rules:
+  - A Lead can only be CONVERTED when a SalesOrder is created for the
+    converted customer and the order is in Sales Review or later stage.
+    The conversion links lead.converted_customer_id and marks the customer
+    with lead_origin = this lead's id for future attribution tracking.
+  - A rep can only see and manage leads assigned to them or created by them.
+    Sales Manager sees all leads in their scope.
+  - Leads with next_followup_date passed and no activity in 7 days
+    generate an OVERDUE_FOLLOWUP alert to the rep.
+  - If a lead has been in status NEW for more than 14 days without
+    any status change, a STALE_LEAD alert is generated.
+
+Event linkage:
+  When a trade event ("Coffee Expo Riyadh") is recorded in the Events
+  Module (File 12), reps can create leads directly from within that event
+  context. The lead.linked_event_id is set, and the Events Module tracks
+  how many leads and eventual customers originated from each event — a
+  direct ROI signal for event attendance decisions.
+
+
+4.5  CLIENT ASSIGNMENT AND COMMISSION SPLIT
+────────────────────────────────────────────
+
+ClientAssignment entity manages the relationship between a customer and
+the reps responsible for them:
+
+  ClientAssignment:
+    - id, tenant_id, customer_id
+    - assignments[] — each entry:
+        { rep_user_id, commission_share_pct, is_primary, effective_from,
+          effective_to (nullable), assigned_by, assigned_at }
+    - total_commission_share_pct must always equal 100%
+    - version (for history tracking — every change creates a new version)
+
+Rules:
+  - At any point in time, the sum of active commission_share_pct across
+    all active assignment rows for one customer must equal exactly 100%.
+  - Changing a commission split after orders are in progress does NOT
+    retroactively affect commissions on existing open orders. The split
+    at the time of order creation is the governing split. New orders
+    use the current (updated) split. This is enforced by capturing the
+    commission_split_snapshot on the CommissionRecord at order creation.
+  - Transferring a customer from one rep to another creates a new
+    ClientAssignment version. The old version is closed (effective_to = today).
+    Orders created under the old version continue with the old commission rules.
+  - Management can share a customer between up to N reps (configurable per
+    tenant; default max = 3 reps per customer).
+  - Self-assignment by a rep is not permitted; only Sales Manager or Admin
+    can assign customers to reps.
+
+Commission rate source hierarchy (evaluated at order creation):
+  1. Customer-specific commission rate (CommissionOverride per customer)
+  2. Product category commission rate (if configured)
+  3. Rep's default commission rate (from SalesAgentProfile)
+  4. Tenant default commission rate (from SalesSettings)
+
+The commission rate is captured in CommissionRecord at the moment of
+order creation and is immutable thereafter. Any rate changes apply
+only to future orders.
+
+
+4.6  COMMISSION ENGINE (FULLY AUTOMATED)
+─────────────────────────────────────────
+
+The commission engine eliminates manual calculation entirely. It operates
+as a pipeline triggered by order and payment events.
+
+Commission lifecycle:
+
+  STEP 1 — ORDER CREATED
+    On SalesOrder creation, CommissionRecord(s) are created:
+      - One record per rep (for split commissions, one per rep)
+      - commission_amount = order_grand_total × commission_rate_pct / 100
+        (or per-line computation if rates differ by product category)
+      - status = PENDING
+      - order_id, customer_id, rep_user_id, commission_rate, commission_amount
+        are captured and become immutable
+      - commission_split_snapshot captured from current ClientAssignment
+
+    Important: Commission is computed on order_grand_total EXCLUDING VAT.
+    A commission of 5% on a 5,000 SAR + 750 VAT order = 5% × 5,000 = 250 SAR.
+    Never computed on the VAT-inclusive total. This must be explicit in
+    the engine and documented in the rep agreement.
+
+  STEP 2 — ORDER CONFIRMED (Payment Confirmed)
+    On Payment Confirmed event (per File 06):
+    CommissionRecord status → APPROVED
+    The rep receives a notification: "Commission approved for Order #XXX"
+
+    If PARTIAL PAYMENT:
+    CommissionRecord status remains PENDING until the payment threshold
+    is met (configurable per tenant: 100% of invoice, or a configurable
+    minimum payment % such as 50%).
+
+  STEP 3 — COMMISSION PAYMENT SCHEDULED
+    At the end of each commission payment cycle (weekly / monthly /
+    per tenant policy), the accounting team initiates the Commission
+    Payout batch. This generates a PayrollCommissionPayment record per
+    rep for all APPROVED commissions in the cycle.
+
+    The Finance user reviews the batch and approves it.
+    On approval:
+    CommissionRecord status → PAID
+    PayrollCommissionPayment is posted to the Accounting Module as
+    a salary/commission expense (Account 6100 or sub-account per tenant
+    CoA, per File 02).
+    The rep receives a notification: "Commission paid for N orders."
+
+  STEP 4 — ORDER CANCELLED OR RETURNED (Reversal)
+    If an order is cancelled after commission was APPROVED or PAID:
+    A CommissionReversal record is created.
+    APPROVED commissions are reset to CANCELLED.
+    PAID commissions trigger a deduction in the next commission cycle
+    (negative line in the next payout batch).
+    The rep is notified of the reversal and the reason.
+
+  Commission status states:
+    PENDING → APPROVED → PAID
+                       → CANCELLED (from APPROVED; if order cancelled)
+    PAID → REVERSED (deduction scheduled in next payout)
+
+  Rules enforced server-side:
+    - Commission amount is never manually edited after creation.
+      Changes to commission (e.g., a dispute) require a CommissionAdjustment
+      record with reason and approver. The adjustment creates a new
+      credit/debit entry; it does not modify the original record.
+    - A rep cannot approve their own commission. Finance / Accounting
+      role holds commission.approve permission.
+    - Commission payout batch requires Finance Manager approval.
+    - Commission records are tenant-scoped and rep-scoped; a rep sees
+      only their own commissions.
+
+
+4.7  PAYMENT TRACKING
+──────────────────────
+
+Payment Tracking gives the sales team visibility into outstanding B2B
+invoices so they can proactively follow up before relationships deteriorate.
+
+The Payment Tracking view is a READ from the Accounting Module's AR Aging
+data. This module does not own any payment records — those belong to
+Accounting (File 02). It surfaces a sales-relevant view of them.
+
+Payment Tracking displays per rep (scoped to their customers):
+
+  Outstanding Invoice List:
+    - Customer Name, Invoice Number, Invoice Date, Due Date
+    - Invoice Amount, Amount Received, Outstanding Balance
+    - Days Overdue (positive = overdue; negative = not yet due)
+    - Payment Status (UNPAID | PARTIALLY_PAID)
+
+  Aggregated view:
+    - Total Outstanding per customer
+    - Total Overdue across all customers
+    - Customers exceeding credit limit (from Accounting credit policy
+      per File 02)
+
+Sales rep follow-up actions from the Payment Tracking screen:
+  - Add a follow-up note (logged to the customer record and shared
+    with the Accounting team).
+  - Request an extended payment term (creates a Payment Term Request
+    linked to the invoice; routed to Finance for approval).
+  - Mark customer as "Contacted about payment" with timestamp.
+    This creates a PaymentFollowUpLog entry.
+
+What the sales rep CANNOT do from this screen:
+  - Record a payment receipt (that is Accounting's function).
+  - Modify an invoice.
+  - Override a credit limit.
+
+Commission connection:
+  The payment tracking view also shows the rep which of their invoices
+  are unpaid and therefore blocking their commission from advancing
+  from PENDING to APPROVED. This creates a direct incentive for reps
+  to actively support collection — their own commissions depend on it.
+
+
+4.8  SALES NOTIFICATIONS
+─────────────────────────
+
+Notifications are generated by background evaluation jobs and
+delivered via the Notification Service (per File 01).
+
+  Notification Type               | Recipient  | Trigger Condition
+  ──────────────────────────────────────────────────────────────────────
+  CUSTOMER_INACTIVE               | Rep        | Customer has not ordered
+                                  |            | in > N days (configurable;
+                                  |            | default 30 days B2B)
+  NEW_CUSTOMER_ASSIGNED           | Rep        | A customer is assigned to
+                                  |            | their portfolio
+  COMMISSION_APPROVED             | Rep        | Payment confirmed for order
+  COMMISSION_PAID                 | Rep        | Commission payout processed
+  COMMISSION_REVERSED             | Rep        | Order cancelled post-approval
+  LEAD_FOLLOWUP_OVERDUE           | Rep        | next_followup_date passed
+                                  |            | with no activity
+  STALE_LEAD                      | Rep        | Lead in NEW status for > 14d
+  ORDER_STATUS_UPDATE             | Rep        | Order they created progressed
+                                  |            | (e.g., Shipped, Delivered)
+  SAMPLE_REQUEST_SUGGESTED        | Rep        | A new coffee lot approved
+                                  |            | for sale and linked to a
+                                  |            | customer who buys that origin
+  REP_SALES_DECLINE               | Manager    | Rep's monthly sales dropped
+                                  |            | > configurable % vs. prior
+  HIGH_VALUE_CUSTOMER_INACTIVE    | Manager    | A VIP customer (top 20% by
+                                  |            | revenue) has not ordered in
+                                  |            | > 21 days
+  COLLECTION_OVERDUE              | Manager    | Customer invoice > 30 days
+                                  |            | overdue with no follow-up
+                                  |            | activity logged
+  CREDIT_LIMIT_EXCEEDED           | Manager    | Customer balance exceeds
+                                  |            | configured credit limit
+
+All alert thresholds are tenant-configurable in SalesSettings.
+Notification delivery channels: iOS push, Android push, in-app, email.
+
+
+4.9  EVENT LINKAGE
+───────────────────
+
+The sales module integrates with the Events Module (File 12) to create
+a connection between operational events and sales activities.
+
+When a trade event, product launch, or marketing campaign is created
+in the Events Module:
+  - It becomes visible in the sales team's event feed.
+  - Leads captured at the event can be tagged with linked_event_id.
+  - After the event, the system shows a "Post-Event Follow-Up" task list
+    for all leads captured at that event.
+  - Sales performance associated with the event (orders from converted
+    event leads) feeds into the event's ROI calculation.
+
+This connection transforms events from passive calendar entries into
+active sales pipeline triggers — a capability the source file specifically
+calls out as a differentiator.
+
+When a new coffee product is launched (ProductLaunchEvent from File 12):
+  - The system identifies customers who regularly purchase that origin,
+    process, or product category.
+  - A SAMPLE_REQUEST_SUGGESTED notification is sent to the reps
+    responsible for those customers.
+  - This creates an immediate follow-up opportunity without requiring
+    the rep to manually review the product catalog.
+
+
+4.10  SALES AGENT PROFILE
+──────────────────────────
+
+SalesAgentProfile:
+  - user_id (links to User from File 01)
+  - employee_id, full_name, city, hire_date
+  - default_commission_rate_pct
+  - commission_payment_cycle (WEEKLY | BI_WEEKLY | MONTHLY)
+  - performance_metrics (computed; not stored):
+      customer_count, active_customer_count, total_sales_ytd,
+      avg_monthly_sales, total_orders_ytd, commission_earned_ytd,
+      commission_pending, commission_paid_ytd, conversion_rate
+  - assignment_history[] (previous customer assignments; for audit)
+  - employment_status (ACTIVE | ON_LEAVE | TERMINATED)
+
+When a rep is TERMINATED:
+  - All their customer assignments are placed in UNASSIGNED status.
+  - The Sales Manager receives an alert listing all affected customers.
+  - Commissions in PENDING or APPROVED status at the time of termination
+    are handled per the termination policy (configurable; default: APPROVED
+    commissions are paid in the final cycle; PENDING commissions are
+    held until the linked orders are paid, up to a maximum holdback period).
+  - A terminated rep's data is never deleted — it is retained for
+    audit, historical reporting, and commission dispute resolution.
+
+
+4.11  SALES MANAGER KPI DASHBOARD
+───────────────────────────────────
+
+Visible to Sales Manager and above. Scoped to their branch/territory.
+
+  Team Performance:
+    - Total Revenue this period (all reps combined)
+    - Revenue by Rep (ranked)
+    - Revenue Growth vs. prior period
+    - Best-performing rep (by revenue, by new customers)
+    - Reps below target (if targets configured via Goals Module)
+
+  Customer Health:
+    - Total Active Customers
+    - Total Inactive Customers (and % of total portfolio)
+    - New Customers this period
+    - At-Risk / Churned Customers (Phase 2)
+
+  Pipeline:
+    - Total Open Leads
+    - Leads by Stage
+    - Conversion Rate (Leads → Customers) this period
+    - Average Time in Pipeline (lead to conversion)
+
+  Collections:
+    - Total Outstanding Balance
+    - Total Overdue Balance (> 30 days)
+    - Customers over credit limit
+    - Collection effectiveness (% of invoices paid within terms)
+
+  Commissions:
+    - Total Commissions Earned (all reps) this period
+    - Total Commissions Pending Payout
+    - Commission Expense % of Revenue (cost of sales efficiency metric)
+
+  Geography:
+    - Sales by City (heatmap or ranked table)
+    - Best-performing city
+    - Cities with no rep coverage (if customer data shows demand)
+
+
+4.12  SALES INTELLIGENCE (Phase 2)
+────────────────────────────────────
+
+Rule-based predictive signals to support proactive sales behavior.
+No decisions are automated — these are signals for reps to act on.
+
+  LIKELY_TO_ORDER_SOON:
+    Customers whose historical order pattern suggests an order is due.
+    Computation: if the customer's median reorder interval is N days,
+    and their last order was ≥ (N × 0.8) days ago, they are flagged
+    as "likely to order within the next few days."
+    Surface: priority band in the rep's customer list.
+
+  CHURN_RISK:
+    Customers whose order frequency has declined by > 30% vs. their
+    own 90-day baseline for two consecutive periods.
+    Surface: red flag on the customer record; alert to rep and manager.
+
+  TERRITORY_GROWTH_OPPORTUNITY:
+    Cities where customer density (existing customers per registered
+    café / restaurant) is low relative to the tenant's successful
+    markets. Identifies geographic whitespace for rep prioritization.
+    Surface: territory map / city ranking in Sales Manager dashboard.
+
+  REP_COACHING_SIGNALS:
+    Identifies specific performance patterns per rep that differ
+    from the team average: e.g., high lead count but low conversion
+    rate → coaching focus on closing; high AOV but low customer count
+    → coaching focus on prospecting.
+    Surface: individual rep performance summary for manager review.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — SYSTEM MODULES / SECTIONS INVOLVED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  This module OWNS:
+  - Lead Pipeline (Lead → Customer conversion)
+  - ClientAssignment (rep ↔ customer relationship + commission split)
+  - CommissionRecord, CommissionReversal, CommissionAdjustment
+  - PaymentFollowUpLog (sales-side follow-up notes on AR)
+  - SalesAgentProfile
+  - SalesSettings (tenant-scoped configuration)
+  - Sales Notifications (triggers)
+  - Sales Intelligence computation (Phase 2)
+  - Sales Dashboards (rep + manager)
+
+  This module READS FROM:
+  - Sales Orders (File 06): order status, revenue, rep linkage
+  - Accounting Module (File 02): AR aging, payment status, invoices,
+    credit policy compliance
+  - Pricing Module (File 10): price resolution at order creation
+  - Customer Master: customer data, business type, city
+  - Events Module (File 12): trade events, product launches
+  - Marketing Module (File 14): campaigns, coupon codes for attribution
+  - HR Module: rep employment status, payroll integration
+
+  This module WRITES TO:
+  - SalesOrder (creates new orders via File 06's order creation API)
+  - Customer Master (creates new customers inline)
+  - Accounting Module (commission payout batch triggers a payroll expense)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — WORKFLOW / PROCESS LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  WORKFLOW A — REP CAPTURES AN ORDER (MOBILE)
+
+  1. Rep opens mobile app → sees their dashboard.
+  2. Taps "New Order" → selects customer from their assigned portfolio.
+  3. Adds products and quantities. Prices auto-filled from PriceResolutionService.
+  4. Reviews total. If a special price is needed, flags as Special Price Request.
+  5. Submits order offline or online (idempotency key generated client-side).
+  6. Server creates: SalesOrder + CommissionRecord(s) in a single transaction.
+  7. Notification sent to Sales team for review.
+  8. Rep sees order in their "Open Orders" list with status "New Rep Order."
+
+6.2  WORKFLOW B — LEAD CAPTURED AT A TRADE EVENT
+
+  1. Rep is at the Coffee Expo Riyadh trade event (linked_event_id set).
+  2. Rep opens mobile app → Lead section → New Lead.
+  3. Enters place name, city, contact, business type, interest level.
+  4. Sets next_followup_date.
+  5. Lead created with status NEW and linked_event_id.
+  6. After the event, rep receives a "Post-Event Follow-Up" task list.
+  7. Rep contacts the lead → updates status to CONTACTED.
+  8. Sends a sample → SAMPLE_SENT.
+  9. Shares a quotation → QUOTATION_SENT.
+  10. Lead places first order → CONVERTED. Customer record created.
+      converted_customer_id set on lead. Lead is closed.
+
+6.3  WORKFLOW C — COMMISSION AUTO-ADVANCEMENT
+
+  1. Order #452 created. CommissionRecord created: PENDING. Amount = 250 SAR.
+  2. Order progresses through review, production, packaging, shipping.
+  3. Customer makes full payment.
+  4. PaymentReceived event fired by Accounting Module.
+  5. CommissionEngine receives event: checks all CommissionRecords
+     linked to orders of this customer with PENDING status.
+  6. Confirms payment threshold met.
+  7. CommissionRecord status → APPROVED.
+  8. Rep receives push notification: "Commission approved — Order #452 — 250 SAR"
+  9. At month-end, Finance generates Commission Payout batch.
+  10. All APPROVED commissions for the period included.
+  11. Finance reviews and approves the batch.
+  12. CommissionRecord status → PAID.
+  13. Payroll expense posted to Accounting Module.
+  14. Rep receives push notification: "Commission paid — 3 orders — 730 SAR total."
+
+6.4  WORKFLOW D — CUSTOMER REASSIGNMENT
+
+  1. Sales Manager opens the Client Assignment screen.
+  2. Selects customer "Café XYZ" currently assigned 100% to Rep A.
+  3. Transfers to Rep B (100%) effective today.
+  4. System:
+     a. Closes the current ClientAssignment entry (effective_to = today).
+     b. Creates a new ClientAssignment entry for Rep B (effective_from = today).
+     c. All CommissionRecords from orders CREATED BEFORE the transfer
+        retain their original assignment (Rep A's commission).
+     d. All new orders from today forward are attributed to Rep B.
+  5. Rep A is notified: "Café XYZ has been transferred from your portfolio."
+  6. Rep B is notified: "Café XYZ has been added to your portfolio."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — DATA REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Lead:
+    id, tenant_id, branch_id, place_name, city, contact_person, mobile,
+    business_type, interest_level, source, linked_event_id?,
+    status, notes, created_by, created_at, assigned_to,
+    last_activity_at, next_followup_date, converted_customer_id?,
+    loss_reason?
+
+  ClientAssignment:
+    id, tenant_id, customer_id, version
+    assignments[] {rep_user_id, commission_share_pct, is_primary,
+                   effective_from, effective_to?, assigned_by, assigned_at}
+    [Constraint: sum(commission_share_pct where effective_to IS NULL) = 100]
+
+  CommissionRecord:
+    id, tenant_id, sales_order_id, rep_user_id, customer_id
+    commission_rate_pct, commission_base_amount (ex-VAT)
+    commission_amount (computed at creation; immutable)
+    commission_split_snapshot (JSON; from ClientAssignment at order time)
+    status (PENDING | APPROVED | PAID | CANCELLED | REVERSED)
+    created_at, approved_at, paid_at, cancelled_at, reversed_at
+    payout_batch_id? (populated when PAID)
+
+  CommissionAdjustment:
+    id, tenant_id, commission_record_id
+    adjustment_type (CREDIT | DEBIT), amount, reason
+    created_by, approved_by, approved_at
+
+  CommissionReversal:
+    id, tenant_id, original_commission_record_id
+    reversal_reason (order_cancelled | order_returned | dispute)
+    deduction_payout_batch_id?
+
+  CommissionPayoutBatch:
+    id, tenant_id, period_start, period_end
+    created_by, approved_by, approved_at, paid_at
+    status (DRAFT | APPROVED | PAID)
+    entries[] {rep_user_id, total_amount, commission_record_ids[]}
+
+  SalesAgentProfile:
+    user_id (PK), tenant_id, employee_id, full_name, city, hire_date
+    default_commission_rate_pct, commission_payment_cycle
+    employment_status
+
+  CommissionRateOverride:
+    id, tenant_id, rep_user_id, customer_id?,
+    product_category_id?, rate_pct, effective_from, effective_to?
+
+  PaymentFollowUpLog:
+    id, tenant_id, customer_id, invoice_id, rep_user_id
+    note, logged_at
+
+  SalesSettings:
+    tenant_id (PK), customer_inactive_threshold_days,
+    customer_churn_threshold_days, lead_stale_days,
+    lead_followup_overdue_days, commission_payout_cycle,
+    commission_trigger_payment_threshold_pct (default 100),
+    max_reps_per_customer (default 3),
+    commission_on_vat_exclusive (default true),
+    sales_intelligence_enabled (Phase 2)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — INVENTORY IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DIRECT IMPACT: None from this module.
+
+Order creation through this module feeds into the order workflow (File 06),
+which in turn triggers inventory allocation and consumption. The Sales
+Management System does not directly write to inventory records.
+
+Indirect: when a SAMPLE_REQUEST_SUGGESTED notification is generated
+(a rep should follow up about a new product), the system reads the
+inventory status of the product to confirm it is available for sampling
+before sending the suggestion. It does not reserve or deduct.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — ACCOUNTING / COSTING IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Sales Management System has one significant accounting impact:
+commission payouts.
+
+When a CommissionPayoutBatch is approved and paid:
+  - The Accounting Module records: Dr Commission Expense / Cr Bank/Cash
+    (or Cr Salaries Payable if included in payroll).
+  - The expense is posted against account 6100 (Salaries & Wages) or
+    a dedicated Commission sub-account per tenant CoA (File 02).
+  - The payment is linked to the employee's payroll record (HR Module).
+
+All other accounting impacts (invoicing, receipts, AR) belong to
+the Accounting Module (File 02). The Sales Management System reads
+them but does not write them.
+
+Commission computed on VAT-exclusive order value:
+  This is a binding accounting rule. Commission = order_net_amount ×
+  rate (not order_total_with_VAT × rate). This prevents the rep from
+  being overcompensated by VAT amounts that pass through the business.
+  The commission_base_amount field stores the VAT-exclusive base used
+  for the calculation. This is documented here for the Accounting
+  Module's expense reconciliation.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — PERMISSIONS / RBAC CONSIDERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Permission                         | Who holds it
+  ─────────────────────────────────────────────────────────────────────────
+  sales.order.create_as_rep          | Sales Rep
+  sales.customer.view (own)          | Sales Rep — own assigned customers only
+  sales.customer.view (all)          | Sales Manager, Admin
+  sales.customer.create              | Sales Rep, Sales Manager
+  sales.customer.assign              | Sales Manager, Admin
+                                     | (reps cannot self-assign customers)
+  sales.lead.create                  | Sales Rep, Sales Manager
+  sales.lead.manage (own)            | Sales Rep — own leads only
+  sales.lead.manage (all)            | Sales Manager, Admin
+  sales.lead.convert                 | Sales Rep (own), Sales Manager
+  sales.commission.view (own)        | Sales Rep — own commissions only
+  sales.commission.view (all)        | Sales Manager, Finance Manager
+  sales.commission.approve           | Finance Manager, Accounting
+  sales.commission.adjust            | Finance Manager (with reason)
+  sales.commission.payout.create     | Finance Manager
+  sales.commission.payout.approve    | Finance Manager, Tenant Admin
+  sales.payment_tracking.view (own)  | Sales Rep — own customers only
+  sales.payment_tracking.view (all)  | Sales Manager, Finance
+  sales.followup.log                 | Sales Rep (own customers)
+  sales.agent.profile.view           | Own profile: Sales Rep
+                                     | All profiles: Sales Manager, Admin
+  sales.agent.profile.manage         | Sales Manager, Admin
+  sales.settings.manage              | Tenant Admin
+  sales.dashboard.view               | All sales roles (scoped)
+  sales.intelligence.view            | Sales Manager, Admin (Phase 2)
+
+  Separation of duties (enforced server-side):
+    - A rep cannot approve their own commission.
+    - A rep cannot assign customers to themselves.
+    - A Sales Manager cannot approve a commission payout that includes
+      their own commissions (if they are also a rep).
+    - Customer data scope: every API query filters by the requesting
+      user's assignment scope. There is no client-side filter as the
+      sole protection.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — BACKEND / API READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+11.1  BACKEND SERVICES REQUIRED
+
+  LeadService
+      CRUD for leads. Status transitions. Conversion to customer.
+      Stale/overdue detection. Event linkage.
+
+  ClientAssignmentService
+      Manage rep ↔ customer relationships and commission splits.
+      Validates split sums to 100%. Versioning on change.
+      Transfer workflow (close old, create new).
+
+  CommissionEngine
+      Listens to OrderCreated event → create CommissionRecord(s).
+      Listens to PaymentConfirmed event → advance CommissionRecord to APPROVED.
+      Listens to OrderCancelled/OrderReturned event → create CommissionReversal.
+      Computes commission on VAT-exclusive base.
+      Respects commission_split_snapshot from ClientAssignment.
+      Is idempotent: duplicate events produce no duplicate records.
+
+  CommissionPayoutService
+      Generates CommissionPayoutBatch from APPROVED CommissionRecords.
+      Manages batch approval workflow.
+      Triggers Accounting Module expense posting on batch payment.
+
+  PaymentTrackingService
+      Read-only view of Accounting Module's AR Aging, scoped to
+      the requesting rep's assigned customers.
+      PaymentFollowUpLog management.
+
+  SalesNotificationService
+      Background jobs evaluating all notification conditions.
+      Emits alerts via Notification Service.
+
+  SalesIntelligenceService (Phase 2)
+      Computes likely-to-order, churn risk, and territory signals
+      nightly. Results cached in SalesIntelligenceSnapshot per customer.
+
+  SalesDashboardService
+      Aggregates and caches all KPIs for rep and manager dashboards.
+      Cache invalidated on OrderCreated, CommissionStatusChanged,
+      CustomerStatusChanged events.
+
+11.2  APIs REQUIRED (versioned at /v1/sales/...)
+
+  Customers:
+    GET    /customers?scope=mine&status=active
+    POST   /customers (create new customer inline)
+    GET    /customers/{id}
+    PATCH  /customers/{id}
+
+  Leads:
+    GET    /leads
+    POST   /leads
+    PATCH  /leads/{id}
+    POST   /leads/{id}/convert
+
+  Client Assignment:
+    GET    /customers/{id}/assignments
+    POST   /customers/{id}/assignments  (create/update split)
+    POST   /customers/{id}/assignments/transfer
+
+  Commissions:
+    GET    /commissions?rep_id=me&status=pending
+    GET    /commissions/{id}
+    POST   /commissions/adjustments
+    GET    /commissions/payouts
+    POST   /commissions/payouts  (create batch)
+    POST   /commissions/payouts/{id}/approve
+
+  Payment Tracking:
+    GET    /payment-tracking?scope=mine
+    POST   /payment-tracking/followup-logs
+
+  Sales Agent Profiles:
+    GET    /agents
+    GET    /agents/{id}
+    PATCH  /agents/{id}
+
+  Dashboards:
+    GET    /dashboard/rep
+    GET    /dashboard/manager
+
+  Settings:
+    GET    /settings, PATCH /settings
+
+  Sales Intelligence (Phase 2):
+    GET    /intelligence/likely-to-order
+    GET    /intelligence/churn-risk
+    GET    /intelligence/territory-growth
+
+11.3  SERVER-SIDE VALIDATIONS
+
+  - Customer scope filter applied from session on every customer query.
+  - Commission amount computed server-side; never trusted from client.
+  - CommissionRecord immutability: commission_amount, commission_rate_pct,
+    commission_base_amount cannot be updated after creation.
+    Corrections are CommissionAdjustment records only.
+  - ClientAssignment split sum must equal 100% at all times.
+  - Rep cannot self-assign customers.
+  - Commission approval: rep_user_id ≠ approving user.
+  - Payout batch includes only APPROVED commissions from the period.
+  - Lead conversion: a SalesOrder for the converted customer must
+    exist in Sales Review or later status.
+  - Commission on VAT-exclusive total: the base is always
+    SalesOrder.subtotal (before VAT), never SalesOrder.grand_total.
+
+11.4  DATABASE TRANSACTIONS
+
+  Order creation + CommissionRecord(s) = single ACID transaction.
+  Payment confirmed event → CommissionRecord APPROVED + audit log
+    = single transaction.
+  ClientAssignment transfer: close old version + create new version
+    + audit log = single transaction.
+  CommissionPayoutBatch approval + CommissionRecord status PAID updates
+    + Accounting expense event + audit log = single transaction.
+  Lead conversion: create Customer + close Lead + first SalesOrder link
+    + audit log = single transaction.
+
+11.5  FAILURE SCENARIOS
+
+  - PaymentConfirmed event received but CommissionEngine fails to
+    advance the record: event stored in retry queue; re-processed
+    with exponential backoff; Commission stays PENDING until processed;
+    Finance sees "Commission Advancement Delayed" alert.
+  - CommissionPayoutBatch accounting posting fails: batch reverts to
+    APPROVED state; commission records remain APPROVED (not PAID);
+    Finance alerted; retry available.
+  - Lead linked_event_id references a deleted event: the lead record
+    is preserved; event linkage shows "Event deleted" gracefully.
+  - Rep device offline; order submitted with idempotency key; reconnects
+    and retries: second submission rejected with idempotent response
+    (returns the already-created order).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — SAAS READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Multi-tenancy:
+    All records (Lead, ClientAssignment, CommissionRecord, etc.) carry
+    tenant_id. Every query filters by tenant_id from session.
+    A rep in Tenant A cannot see Tenant B's customers or commissions
+    under any circumstances.
+
+  Per-tenant configuration (SalesSettings):
+    Customer inactive threshold, churn threshold, lead stale threshold,
+    commission payout cycle, commission payment trigger (100% or partial%),
+    max reps per customer, commission on VAT-exclusive (default true),
+    commission rate defaults, notification thresholds, sales intelligence
+    toggle (Phase 2).
+
+  Subscription gating:
+    - Phase 1: Full operational module (order creation, customer portfolio,
+      leads, commissions, payment tracking, dashboards, notifications).
+    - Phase 2: Sales Intelligence (churn risk, likely-to-order, territory
+      growth, rep coaching signals).
+
+  SaaS risks:
+    - Commission data is financially sensitive. Cross-tenant leakage
+      would expose one business's rep compensation to another.
+      Mitigation: tenant_id filter on every CommissionRecord query;
+      rep scope filter within tenant; tested invariants.
+    - A rep in one tenant using a stolen session tries to access another
+      tenant's customer list. Mitigation: tenant_id from session, not
+      from request body; session verification per File 01.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — WEB / iOS / ANDROID / STATION READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Surface         | Sales Management workflows
+  ────────────────┼──────────────────────────────────────────────────────────
+  Web (admin)     | Full module: customer management, client assignment,
+                  | commission configuration, payout batch management,
+                  | sales manager KPI dashboard, full reports, settings
+  iOS / Android   | PRIMARY surface for sales reps: order creation,
+                  | customer portfolio browsing, lead capture and pipeline,
+                  | commission status and history, payment tracking (own
+                  | customers), rep dashboard, notifications
+  Station screens | Not applicable to this module
+
+  Mobile-specific design requirements:
+    - ORDER CREATION must complete in < 5 taps on mobile for a repeat order
+      (same customer, same products, same quantity as last time). A "Repeat
+      Last Order" shortcut should be prominent.
+    - LEAD CAPTURE must complete in < 30 seconds. The form on mobile must
+      show only required fields; optional fields collapse.
+    - COMMISSION DASHBOARD must be the most visible section on the rep's
+      mobile dashboard. Reps check this regularly — make it prominent.
+    - OFFLINE SUPPORT is essential for reps in areas with poor coverage
+      (remote warehouses, industrial areas, out-of-coverage locations).
+      Order creation and lead creation must work offline with sync on
+      reconnect.
+
+  Offline considerations:
+    - Orders: buffered with idempotency key. Sync on reconnect.
+    - Leads: buffered locally. Sync on reconnect.
+    - Commission status: read-only; cached from last sync; labeled
+      "last updated [timestamp]."
+    - Payment tracking: read-only; not offline-capable (requires live AR data).
+    - Commissions: cannot advance (that requires server-side event processing).
+
+  Notifications across surfaces:
+    All notifications defined in §4.8 are delivered via:
+    - iOS: push notification
+    - Android: push notification
+    - Web: in-app notification
+    - Email (for important ones: commission paid, high-value customer inactive)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — INTEGRATION READINESS REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ACCOUNTING MODULE (internal):
+    - CommissionEngine listens to PaymentConfirmed events.
+    - AR Aging data read for Payment Tracking view.
+    - Commission Payout batch triggers a payroll expense posting.
+    All three are internal event/API integrations, not external.
+
+  ORDER WORKFLOW (File 06, internal):
+    - Order creation API is the entry point for rep-created orders.
+    - CommissionEngine listens to OrderCreated, OrderCancelled,
+      OrderReturned events.
+
+  PRICING MODULE (File 10, internal):
+    - PriceResolutionService called at order line creation.
+
+  EVENTS MODULE (File 12, internal):
+    - Lead creation can reference an Event.
+    - EventCreated events may trigger SAMPLE_REQUEST_SUGGESTED
+      notifications to relevant reps.
+
+  HR / PAYROLL MODULE (internal):
+    - Commission payout links to payroll records.
+    - Rep employment status (TERMINATED) gates commission final payout.
+
+  EXTERNAL: None in Phase 1.
+
+  Phase 2 potential:
+    - CRM integration for larger tenants who manage customer data in
+      external CRM tools. This would require a bidirectional customer
+      data sync with conflict resolution. Recommended: ERP is master;
+      CRM is a downstream consumer.
+    - GPS / Maps integration for territory management and rep location
+      tracking during field visits. Privacy-sensitive; requires explicit
+      tenant and employee consent.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 15 — DASHBOARD / REPORTING IMPACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sales reports are defined in the Reports Center (File 15, Domain C —
+Reports C-01 through C-08). The dashboards defined here are operational
+(real-time, role-scoped) rather than period-defined report snapshots.
+
+  REP DASHBOARD (real-time, own scope):
+    My Customers: total, active, inactive, new this month
+    My Orders: open, completed, in collection
+    My Sales: total this month, vs. last month, AOV
+    My Commissions: pending, approved, paid this month
+    My Leads: open pipeline by stage, overdue follow-ups
+
+  SALES MANAGER KPI DASHBOARD (real-time, team scope):
+    Team Revenue: total, by rep (ranked), growth %
+    Pipeline: total leads, by stage, conversion rate
+    Customer Health: active, inactive, at-risk count
+    Collections: outstanding, overdue, over credit limit
+    Commissions: total earned, total pending payout
+
+  COUNTING RULES:
+    - Commission figures in dashboards and reports always exclude
+      CANCELLED and REVERSED commissions from totals.
+    - "Active Customer" count uses the tenant-configured threshold
+      (default 30 days). If the threshold is changed, the count
+      updates immediately on the next dashboard refresh.
+    - A customer with an open order but no confirmed shipment counts
+      as Active.
+    - Rep sales figures include only orders in status Shipped,
+      Delivered, or Closed — NOT orders in earlier stages. This
+      prevents reps from inflating their "sales" by creating orders
+      that are never fulfilled.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 16 — DEVELOPER IMPLEMENTATION NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. The CommissionEngine must be designed as an event-driven service,
+     not a polling job. It subscribes to domain events (OrderCreated,
+     PaymentConfirmed, OrderCancelled) via the internal EventBus. Using
+     a polling job risks delays and missed events. If events are
+     dispatched via an outbox pattern (per Accounting Module File 02
+     design principle), the Commission Engine is a consumer of that
+     outbox.
+
+  2. CommissionRecord.commission_amount is computed at order creation
+     and stored permanently. Do NOT recompute dynamically from the
+     current order total — orders may be edited (through the revision
+     workflow in File 06) and the commission must reflect the terms
+     agreed at order time. If an order revision changes the total,
+     a CommissionAdjustment is created for the delta; the original
+     record is not modified.
+
+  3. The ClientAssignment split sum (100%) must be enforced at the
+     database level with a check constraint on the sum of active
+     commission_share_pct per customer, in addition to application-level
+     validation. A rep share update that brings the total above or
+     below 100% must be rejected even if it passes application validation.
+
+  4. "Repeat Last Order" on mobile: implementation approach — store
+     the last N orders per customer × rep combination in a
+     RepOrderHistory cache. The mobile app retrieves this to prefill
+     the order form. The prefilled data is advisory; the server validates
+     the full order on submission regardless.
+
+  5. Lead conversion must be atomic: the Lead.status → CONVERTED, the
+     Customer record creation (if new), and the first SalesOrder linkage
+     must all succeed or all roll back. A partial conversion (lead marked
+     converted but customer not created) creates an orphaned lead state
+     that corrupts pipeline reporting.
+
+  6. Commission payout batch generation should be idempotent: if a batch
+     is generated twice for the same period, the second generation must
+     detect the existing batch and return it rather than creating a
+     duplicate. Key: (tenant_id, period_start, period_end, rep_user_id).
+
+  7. For the Payment Tracking view (§4.7), the query must join
+     SalesOrders → Invoices → Receipts → AR balance, filtered by
+     the rep's assigned customer IDs. This query involves four tables
+     and must be pre-computed or carefully indexed. On large tenants
+     with many B2B customers, this can be a performance hotspot.
+     Recommend: nightly pre-aggregation with intraday cache invalidation
+     on payment events.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 17 — EDGE CASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  EC-01: A customer is transferred from Rep A to Rep B while Rep A has 5
+         open orders. Commission on those 5 orders belongs entirely to Rep A
+         (captured at order creation time). Rep B receives commission only
+         on new orders created after the transfer date. This is not optional —
+         it is contractually required and must be provable from the
+         commission_split_snapshot on each CommissionRecord.
+
+  EC-02: Rep A and Rep B both share a customer (70%/30% split). Rep A
+         creates an order. Both CommissionRecords are created simultaneously
+         in the same transaction: Rep A at 70% of the commission, Rep B
+         at 30%. If the transaction fails midway (e.g., Rep B's record
+         fails to create), the entire transaction rolls back. Never create
+         a partial commission split — either all records are created or none.
+
+  EC-03: Rep is terminated while they have APPROVED commissions (unpaid).
+         Per the configured termination policy, the APPROVED commissions
+         must be included in the final payout batch. The payout batch
+         generation must include commissions for TERMINATED reps; the
+         batch approval flow must handle this case explicitly (Finance sees
+         "includes terminated rep commissions" annotation).
+
+  EC-04: A partial payment is received that meets the commission trigger
+         threshold (e.g., 80% paid, trigger is 50%). CommissionRecord
+         advances to APPROVED. Subsequently the remaining 20% payment
+         is received — no additional commission event fires (the record
+         is already APPROVED).
+
+  EC-05: An order is returned after the commission was already PAID.
+         A CommissionReversal is created. The reversal amount is deducted
+         from the rep's NEXT commission payout batch as a negative line.
+         The rep is notified. If the rep has already been terminated and
+         there is no future payout, a separate deduction process is required
+         per HR policy (out of scope for this system; flag for HR).
+
+  EC-06: A customer exists in two different reps' claims simultaneously
+         (data entry error — both reps "registered" the same café).
+         Detection: duplicate detection on (customer mobile OR company name +
+         city) during customer creation. The system warns of a potential
+         duplicate and shows the existing record. Admin must resolve the
+         conflict before both records persist.
+
+  EC-07: A lead is captured at a trade event but the event is later
+         cancelled in the Events Module. The lead.linked_event_id remains
+         set; the event record is soft-deleted. The lead's event reference
+         shows "Event Cancelled" in the UI. The lead itself is unaffected —
+         it continues through its lifecycle normally.
+
+  EC-08: A Sales Manager who is also a rep (in a small team, this is
+         common) needs to approve their own commission. The system blocks
+         self-approval regardless of role. A second Finance Manager or the
+         Tenant Admin must approve. If no second approver exists, the
+         Tenant Owner must approve. This edge case must be handled in the
+         payout batch UI — "1 commission requires approval by a different
+         user" annotation.
+
+  EC-09: Commission rate changes mid-cycle. New rate effective from today.
+         Orders created today and after: new rate. Orders created before
+         today: old rate (from commission_split_snapshot on CommissionRecord).
+         When the Finance team generates the payout batch, they may see two
+         different rates for the same rep in the same period — this is
+         correct and must be clearly displayed.
+
+  EC-10: Rep submits the same order twice (network timeout, tapped twice).
+         Idempotency key prevents duplicate creation. Second submission
+         returns the already-created order ID with HTTP 200 (not an error).
+         Rep's UI updates normally. No duplicate CommissionRecords created.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 18 — QUESTIONS / AMBIGUITIES / RISKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OPEN QUESTIONS:
+
+  Q1: Is commission computed on the full order value, or only on specific
+      product categories (e.g., commission on coffee only, not on equipment)?
+      WHY IT MATTERS: The commission engine design changes significantly
+      if different rates apply to different product categories within the
+      same order. The source implies a flat order-level rate. Confirm.
+      Recommendation: support both models; per-category rate is a higher-
+      complexity option gated behind a configuration flag.
+
+  Q2: What is the commission payment trigger threshold — 100% payment,
+      or does partial payment (e.g., 50%+) qualify?
+      WHY IT MATTERS: Setting it at 100% means reps only earn on fully
+      settled invoices, incentivizing collection follow-up. Setting it
+      lower reduces collection motivation but is more common in practice.
+      Recommendation: 100% default; tenant-configurable.
+
+  Q3: Is there a minimum order value threshold below which no commission
+      is earned?
+      WHY IT MATTERS: A SAR 50 order generates a SAR 2.50 commission at 5%.
+      Processing overhead may exceed the commission value. Recommendation:
+      configurable minimum commission threshold (default: none).
+
+  Q4: What happens to commissions on orders that are partially returned
+      (some products returned, others kept)?
+      WHY IT MATTERS: The commission should be reduced by the returned
+      portion. The system needs to know the returned line amount to compute
+      the reversal correctly. This requires the return/Credit Note workflow
+      to report per-line values, not just a total amount.
+
+  Q5: Are external sales agents (independent contractors, not employees)
+      in scope, or are all reps internal employees?
+      WHY IT MATTERS: External contractors have different tax treatment
+      (no social insurance, different withholding rules in Saudi Arabia).
+      If external reps are in scope, the commission payout batch must
+      distinguish between employee payroll and contractor payments.
+      Recommendation: Phase 1 = internal employees only; Phase 2 = support
+      for external contractors with separate payment flow.
+
+  Q6: Can a rep see their own commission rate, or is it confidential?
+      WHY IT MATTERS: If reps can see their own rate, they can compute
+      expected commissions and contest discrepancies. This is
+      beneficial for trust. However, if rates differ between reps, a
+      visible rate might create inter-rep friction.
+      Recommendation: reps see their own rate; cannot see others' rates.
+      The view is scoped to own profile only.
+
+CLASSIFIED RISKS:
+
+  ID  | Risk                                           | Severity | Fix
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R1  | Commission computed on VAT-inclusive total     | CRITICAL | commission_base_amount = order.subtotal
+      | (overpays rep by 15%)                          |          | (ex-VAT). Enforced server-side.
+      |                                                 |          | Unit test: verify commission_amount
+      |                                                 |          | on a known order with known VAT.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R2  | Rep sees another rep's customers or            | CRITICAL | Scope filter from session on every
+      | commissions (cross-rep data leak)              |          | query. Integration test: rep A cannot
+      |                                                 |          | retrieve rep B's CommissionRecords.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R3  | Commission record modified after creation      | CRITICAL | commission_amount, rate, base are
+      | (changing the agreed terms)                    |          | immutable post-creation. Adjustments
+      |                                                 |          | via CommissionAdjustment only.
+      |                                                 |          | DB-level constraint recommended.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R4  | ClientAssignment split sum ≠ 100%              | CRITICAL | DB check constraint on sum of
+      | (commission math breaks)                       |          | active shares per customer.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R5  | Rep self-approves commission                   | HIGH     | Separation-of-duties: rep_user_id ≠
+      |                                                 |          | approving_user_id. Server-side.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R6  | Payment event missed, commission stuck         | HIGH     | CommissionEngine uses event bus with
+      | in PENDING indefinitely                        |          | retry/dead-letter queue. Finance sees
+      |                                                 |          | "stuck commissions" alert after N days.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R7  | Lead duplicated (same café registered by       | HIGH     | Duplicate detection on customer create
+      | two reps)                                      |          | (mobile + company name + city fuzzy match).
+      |                                                 |          | Warning presented; admin resolves.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R8  | Rep sales figures include unshipped orders     | HIGH     | Rep revenue = orders in Shipped /
+      | (inflates performance metrics)                 |          | Delivered / Closed only.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R9  | Commission payout batch generated twice        | MEDIUM   | Idempotency on batch generation:
+      | for same period (double payment)               |          | (tenant_id, period_start, period_end)
+      |                                                 |          | unique constraint per rep per period.
+  ────┼────────────────────────────────────────────────┼──────────┼───────────────────────────────────────
+  R10 | Offline order submitted, network restored,     | MEDIUM   | Idempotency key on every rep order
+      | user retaps submit → duplicate order           |          | submission. Server deduplicates.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 19 — ARTIFACT OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  - Text file:  Rewritten_Technical_Document_File_16_Sales_Management.txt
+  - Word file:  Not generated per standing user instruction.
+  - This content is preserved in working context for the master document.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 20 — RECOMMENDED NEXT STEP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before development begins on this module:
+
+  1. R1 (Critical) — Confirm commission is computed on VAT-exclusive
+     subtotal. Document this in the rep agreement so it is a known
+     and agreed term, not a surprise at payout time.
+
+  2. R2 (Critical) — Confirm cross-rep scope isolation is tested with
+     specific integration tests before any rep-facing API is deployed.
+
+  3. R3, R4 (Critical) — Confirm CommissionRecord immutability and
+     ClientAssignment sum constraint are enforced at the database layer.
+
+  4. Q1 — Commission scope: full order value or per-product-category?
+     This decision affects the CommissionEngine architecture significantly.
+
+  5. Q2 — Commission trigger: 100% payment or partial payment threshold?
+     Document in SalesSettings as a tenant-configurable default.
+
+  6. Q5 — Internal reps only in Phase 1? Confirm before building the
+     payout batch integration with HR/Payroll.
+
+  7. Phase 1 boundary — Confirm Phase 2 features (Sales Intelligence:
+     churn risk, likely-to-order, territory growth) are explicitly out
+     of Phase 1 scope. This prevents scope creep during the initial build.
+
+================================================================================
+
+I have finished rewriting this file.
+I have saved the rewritten version as a Text file in artifacts
+(Word not generated per your standing instruction).
+Please review and confirm if I should continue to the next file.

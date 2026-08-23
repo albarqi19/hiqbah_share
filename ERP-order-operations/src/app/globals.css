@@ -1,0 +1,207 @@
+@import "tailwindcss";
+
+:root {
+  /* Primary Palette */
+  --slate: #6B7280;
+  --slate-light: #9CA3AF;
+  --slate-dark: #4B5563;
+  --orange: #7C3AED;
+  --orange-light: #F3E8FF;
+  --orange-dark: #6D28D9;
+  --cream: #F9FAFB;
+  --cream-dark: #F3F4F6;
+
+  /* Secondary Palette */
+  --charcoal: #1F2937;
+  --brown: #6B7280;
+  --brown-light: #9CA3AF;
+  --white: #FFFFFF;
+
+  /* Semantic */
+  --background: #F9FAFB;
+  --foreground: #1F2937;
+  --card: #FFFFFF;
+  --card-hover: #F9FAFB;
+  --border: #E5E7EB;
+  --border-light: #F3F4F6;
+  --muted: #F3F4F6;
+  --muted-foreground: #6B7280;
+
+  /* Status */
+  --success: #22c55e;
+  --success-bg: #dcfce7;
+  --warning: #f59e0b;
+  --warning-bg: #fef3c7;
+  --danger: #ef4444;
+  --danger-bg: #fecaca;
+  --info: #64748B;
+  --info-bg: #F1F5F9;
+
+  /* Sidebar */
+  --sidebar: #1F2937;
+  --sidebar-hover: #374151;
+  --sidebar-active: #7C3AED;
+  --sidebar-text: rgba(255, 255, 255, 0.7);
+  --sidebar-text-active: #FFFFFF;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-border: var(--border);
+  --color-border-light: var(--border-light);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-slate: var(--slate);
+  --color-slate-light: var(--slate-light);
+  --color-slate-dark: var(--slate-dark);
+  --color-orange: var(--orange);
+  --color-orange-light: var(--orange-light);
+  --color-orange-dark: var(--orange-dark);
+  --color-cream: var(--cream);
+  --color-cream-dark: var(--cream-dark);
+  --color-charcoal: var(--charcoal);
+  --color-brown: var(--brown);
+  --color-brown-light: var(--brown-light);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-sidebar-text: var(--sidebar-text);
+  --color-sidebar-text-active: var(--sidebar-text-active);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Tajawal", system-ui, -apple-system, sans-serif;
+  font-weight: 400;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Tajawal", system-ui, sans-serif;
+  font-weight: 800;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-completed { background: var(--success-bg); color: #166534; }
+.status-pending { background: var(--warning-bg); color: #92400e; }
+.status-in-production { background: var(--info-bg); color: #475569; }
+.status-delivered { background: var(--success-bg); color: #166534; }
+.status-partial { background: var(--warning-bg); color: #92400e; }
+.status-not-yet { background: var(--muted); color: var(--muted-foreground); }
+.status-paid { background: var(--success-bg); color: #166534; }
+.status-not-paid { background: var(--danger-bg); color: #991b1b; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Order Operations (S0) — scoped design tokens
+   ADDITIVE ONLY. Mirrors the approved Figma "ERP Design System & Order
+   Operations" file (zinc-gray neutrals + restrained indigo accent).
+   These --oo-* tokens are consumed ONLY by Order Operations components
+   (src/components/OrderLifecyclePanel.tsx). They do not replace or alias
+   the existing brand tokens (--orange, --slate, --status-*, etc.) used
+   elsewhere in the ERP — those are untouched.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --oo-text-primary: #18181b;
+  --oo-text-secondary: #52525b;
+  --oo-text-muted: #a1a1aa;
+
+  --oo-bg-default: #ffffff;
+  --oo-bg-subtle: #fafafa;
+  --oo-bg-elevated: #ffffff;
+
+  --oo-border-default: #e4e4e7;
+  --oo-border-strong: #d4d4d8;
+
+  --oo-action-primary: #4f46e5;
+  --oo-action-primary-hover: #4338ca;
+
+  /* Waiting Approval / Waiting Preparation Review */
+  --oo-status-waiting: #d97706;
+  --oo-status-waiting-bg: #fffbeb;
+
+  /* Preparing */
+  --oo-status-preparing: #2563eb;
+  --oo-status-preparing-bg: #eff6ff;
+
+  /* Ready for Shipping (teal — kept distinct from Completed's green) */
+  --oo-status-ready: #0d9488;
+  --oo-status-ready-bg: #f0fdfa;
+
+  /* Completed */
+  --oo-status-success: #16a34a;
+  --oo-status-success-bg: #f0fdf4;
+
+  /* On Hold */
+  --oo-status-hold: #b45309;
+  --oo-status-hold-bg: #fef3c7;
+
+  /* Blocked (preparation decision, not an order status) */
+  --oo-status-blocked: #dc2626;
+  --oo-status-blocked-bg: #fef2f2;
+
+  /* Rejected — destructive red */
+  --oo-status-rejected: #dc2626;
+  --oo-status-rejected-bg: #fef2f2;
+
+  /* Cancelled — neutral dark gray, deliberately NOT red so it never reads
+     the same as Rejected/Blocked. */
+  --oo-status-cancelled: #3f3f46;
+  --oo-status-cancelled-bg: #f4f4f5;
+}
+
+@theme inline {
+  --color-oo-text-primary: var(--oo-text-primary);
+  --color-oo-text-secondary: var(--oo-text-secondary);
+  --color-oo-text-muted: var(--oo-text-muted);
+
+  --color-oo-bg-default: var(--oo-bg-default);
+  --color-oo-bg-subtle: var(--oo-bg-subtle);
+  --color-oo-bg-elevated: var(--oo-bg-elevated);
+
+  --color-oo-border-default: var(--oo-border-default);
+  --color-oo-border-strong: var(--oo-border-strong);
+
+  --color-oo-action-primary: var(--oo-action-primary);
+  --color-oo-action-primary-hover: var(--oo-action-primary-hover);
+
+  --color-oo-status-waiting: var(--oo-status-waiting);
+  --color-oo-status-waiting-bg: var(--oo-status-waiting-bg);
+  --color-oo-status-preparing: var(--oo-status-preparing);
+  --color-oo-status-preparing-bg: var(--oo-status-preparing-bg);
+  --color-oo-status-ready: var(--oo-status-ready);
+  --color-oo-status-ready-bg: var(--oo-status-ready-bg);
+  --color-oo-status-success: var(--oo-status-success);
+  --color-oo-status-success-bg: var(--oo-status-success-bg);
+  --color-oo-status-hold: var(--oo-status-hold);
+  --color-oo-status-hold-bg: var(--oo-status-hold-bg);
+  --color-oo-status-blocked: var(--oo-status-blocked);
+  --color-oo-status-blocked-bg: var(--oo-status-blocked-bg);
+  --color-oo-status-rejected: var(--oo-status-rejected);
+  --color-oo-status-rejected-bg: var(--oo-status-rejected-bg);
+  --color-oo-status-cancelled: var(--oo-status-cancelled);
+  --color-oo-status-cancelled-bg: var(--oo-status-cancelled-bg);
+}

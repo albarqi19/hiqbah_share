@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+.next/
+dist/
+build/
+out/
+.turbo/
+coverage/
+
+# Secrets - real env files (keep .env.example)
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.log
