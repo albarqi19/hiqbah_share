@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, Fragment } from "react";
+import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
 import {
   AlertTriangle, Clock, ClipboardClock, MessageSquare, PauseCircle, RotateCcw, Ban, CheckCircle2,
   ClipboardList, UserCircle2, Loader2, Send, RefreshCw, PackageCheck, XCircle, Hammer,
@@ -17,7 +17,11 @@ import {
   submitOrderStatusAction,
   submitPreparationReview,
   canHold, canResume, canCancel, canComplete,
+  fetchFulfillmentOptions,
+  derivePreparationDecision,
+  roundKg,
   type OrderStatusAction, type OrderNoteDepartment, type PreparationReviewItemInput,
+  type FulfillmentOptions,
 } from "@/lib/order-operations-client";
 
 // ─── Shared types (structural — page-specific Order/OrderItem types satisfy these) ──
@@ -503,17 +507,18 @@ export function StatusActionsBar({
 
 // ─── Preparation Review ───────────────────────────────────────────────────────
 
-type DraftItem = { decision: string; available: string; required: string };
-type Draft = Record<string, DraftItem>;
+// What the reviewer chose, not what the stock says. "" = leave this item out of the
+// submission, "auto" = include it and let the shelf decide the split, "Blocked" = the
+// one call that is genuinely a human's. The displayed decision and quantities are
+// derived from live stock at render time, so they can never drift out of sync.
+type Selection = "" | "auto" | "Blocked";
+type Draft = Record<string, Selection>;
 
 function buildInitialDraft(items: PreparationOrderItem[]): Draft {
   const draft: Draft = {};
   for (const item of items) {
-    draft[item.id] = {
-      decision: item.preparationDecision ?? "",
-      available: item.availableQuantity != null ? String(item.availableQuantity) : "",
-      required: item.productionRequiredQuantity != null ? String(item.productionRequiredQuantity) : "",
-    };
+    draft[item.id] =
+      item.preparationDecision === "Blocked" ? "Blocked" : item.preparationDecision ? "auto" : "";
   }
   return draft;
 }
@@ -558,8 +563,6 @@ function DecisionBadge({ decision }: { decision: string }) {
   );
 }
 
-const QUANTITY_TOLERANCE = 0.001;
-
 export function PreparationReviewTable({
   orderId,
   items,
@@ -582,47 +585,78 @@ export function PreparationReviewTable({
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
-  function setItemDecision(itemId: string, decision: string, requestedQty: number) {
+  // Live stock picture, one entry per order item. The split between shelf and production
+  // is no longer typed by hand — it is read from the server, which is also the only
+  // place that can reserve it.
+  const [stock, setStock] = useState<Record<string, FulfillmentOptions>>({});
+  const [stockLoading, setStockLoading] = useState(true);
+  const [stockError, setStockError] = useState<string | null>(null);
+
+  const itemIds = useMemo(() => items.map((i) => i.id).join(","), [items]);
+
+  const loadStock = useCallback(async () => {
+    setStockLoading(true);
+    const results = await Promise.all(itemIds.split(",").filter(Boolean).map(fetchFulfillmentOptions));
+    const next: Record<string, FulfillmentOptions> = {};
+    let failed = false;
+    for (const r of results) {
+      if (r.ok) next[r.data.orderItemId] = r.data;
+      else failed = true;
+    }
+    setStock(next);
+    setStockError(failed ? "stock" : null);
+    setStockLoading(false);
+  }, [itemIds]);
+
+  // Plain fetch-on-mount. The rule fires on every data-loading effect in this codebase
+  // (see dashboard/inventory/page.tsx and dashboard/page.tsx); there is no data-fetching
+  // library here to move it into, and the state it sets is the fetch result itself.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void loadStock(); }, [loadStock]);
+
+  function setItemDecision(itemId: string, value: string) {
     setSavedMsg(null);
-    setDraft((prev) => {
-      const current = prev[itemId] ?? { decision: "", available: "", required: "" };
-      let { available, required } = current;
-      if (decision === "Available on Shelf") {
-        available = String(requestedQty);
-        required = "0";
-      } else if (decision === "Needs Production") {
-        available = "0";
-        required = String(requestedQty);
-      } else if (decision === "") {
-        available = "";
-        required = "";
-      }
-      // Partially Available / Blocked: leave whatever is already there for the user to adjust.
-      return { ...prev, [itemId]: { decision, available, required } };
-    });
+    // Every non-Blocked, non-empty choice collapses to "auto": the reviewer is saying
+    // "include this item", and the shelf works out the split.
+    const selection: Selection = value === "Blocked" ? "Blocked" : value === "" ? "" : "auto";
+    setDraft((prev) => ({ ...prev, [itemId]: selection }));
   }
 
-  function setItemQuantity(itemId: string, field: "available" | "required", value: string) {
-    setSavedMsg(null);
-    setDraft((prev) => ({ ...prev, [itemId]: { ...prev[itemId], [field]: value } }));
+  /** The decision and quantities to display for one item, derived from live stock. */
+  function viewFor(itemId: string): { decision: string; available: string; required: string } {
+    const selection = draft[itemId] ?? "";
+    if (selection === "") return { decision: "", available: "", required: "" };
+    const s = stock[itemId];
+    if (selection === "Blocked") {
+      // Blocked releases the shelf and leaves the whole outstanding demand to be produced —
+      // which is what the server stores, so show that rather than a misleading zero.
+      const demand = s ? roundKg(s.reservedQty + s.outstandingQty) : 0;
+      return { decision: "Blocked", available: "0", required: String(demand) };
+    }
+    if (!s) return { decision: "", available: "", required: "" };
+    return {
+      decision: derivePreparationDecision(s.outstandingQty, s.coverableFromShelfQty, s.reservedQty),
+      available: String(roundKg(s.reservedQty + s.coverableFromShelfQty)),
+      required: String(roundKg(s.outstandingQty - s.coverableFromShelfQty)),
+    };
   }
 
   const reviewedEntries = items
-    .map((item) => ({ item, d: draft[item.id] }))
-    .filter(({ d }) => d && d.decision !== "");
+    .map((item) => ({ item, selection: draft[item.id] ?? ("" as Selection) }))
+    .filter(({ selection }) => selection !== "");
 
   // Usability-only validation — the backend remains authoritative and re-validates
-  // everything server-side regardless of what this allows through.
+  // everything server-side regardless of what this allows through. The quantity checks
+  // that used to live here are gone: the numbers are no longer typed, so they cannot
+  // disagree with each other.
   const blockedWithoutNote = reviewedEntries.some(
-    ({ d }) => d.decision === "Blocked" && !note.trim()
+    ({ selection }) => selection === "Blocked" && !note.trim()
   );
-  const partialMismatch = reviewedEntries.some(({ item, d }) => {
-    if (d.decision !== "Partially Available") return false;
-    const a = Number(d.available) || 0;
-    const r = Number(d.required) || 0;
-    return !(a > 0) || !(r > 0) || Math.abs(a + r - item.quantityKg) > QUANTITY_TOLERANCE;
-  });
-  const canSave = canEdit && reviewedEntries.length > 0 && !blockedWithoutNote && !partialMismatch;
+  // A row with no stock data renders as "Not Reviewed" but would still have been sent,
+  // silently re-deciding an item the reviewer could not see. Refuse to submit instead.
+  const missingStock = reviewedEntries.some(({ item }) => !stock[item.id]);
+  const canSave =
+    canEdit && reviewedEntries.length > 0 && !blockedWithoutNote && !stockLoading && !missingStock;
 
   async function handleSave() {
     if (submitting || !canSave) return;
@@ -630,40 +664,40 @@ export function PreparationReviewTable({
     setError(null);
     setSavedMsg(null);
 
-    const payloadItems: PreparationReviewItemInput[] = reviewedEntries.map(({ item, d }) => ({
-      orderItemId: item.id,
-      decision: d.decision as PreparationReviewItemInput["decision"],
-      availableQuantity: d.available === "" ? 0 : Number(d.available),
-      productionRequiredQuantity: d.required === "" ? 0 : Number(d.required),
-    }));
+    // Only Blocked is asserted. Every other item is sent bare so the server reserves
+    // whatever the shelf can cover at the moment it runs — the preview shown here may
+    // be seconds old, and another order may have taken the stock in between.
+    const payloadItems: PreparationReviewItemInput[] = reviewedEntries.map(({ item, selection }) =>
+      selection === "Blocked"
+        ? { orderItemId: item.id, decision: "Blocked" as const }
+        : { orderItemId: item.id }
+    );
 
     const result = await submitPreparationReview(orderId, payloadItems, note.trim() || undefined);
     setSubmitting(false);
 
     if (!result.ok) {
       setError(describeApiError(result.error));
-      if (result.error.status === 409) onSuccess();
+      if (result.error.status === 409) { void loadStock(); onSuccess(); }
       return;
     }
 
-    // Re-sync the draft to the canonical (rounded, stored) server values.
+    // Re-sync the reviewer's selection to what the server actually recorded. The
+    // quantities need no syncing — they are derived from the stock reload below.
     const byId = new Map(result.data.items.map((i) => [i.id, i]));
     setDraft((prev) => {
       const next: Draft = { ...prev };
       for (const item of items) {
         const fresh = byId.get(item.id);
-        if (fresh) {
-          next[item.id] = {
-            decision: fresh.preparationDecision ?? "",
-            available: fresh.availableQuantity != null ? String(fresh.availableQuantity) : "",
-            required: fresh.productionRequiredQuantity != null ? String(fresh.productionRequiredQuantity) : "",
-          };
-        }
+        if (!fresh) continue;
+        next[item.id] =
+          fresh.preparationDecision === "Blocked" ? "Blocked" : fresh.preparationDecision ? "auto" : "";
       }
       return next;
     });
     setNote("");
     setSavedMsg(t("prepReviewSaved"));
+    void loadStock();
     onSuccess();
   }
 
@@ -689,6 +723,7 @@ export function PreparationReviewTable({
             <tr className="text-xs text-brown/60">
               <th className="text-start px-2 py-1 font-semibold">{t("beanType")}</th>
               <th className="text-end px-2 py-1 font-semibold">{t("requestedQtyLabel")}</th>
+              <th className="text-end px-2 py-1 font-semibold">{t("onShelfFreeLabel")}</th>
               <th className="text-end px-2 py-1 font-semibold">{t("availableQuantityLabel")}</th>
               <th className="text-end px-2 py-1 font-semibold">{t("productionRequiredQuantityLabel")}</th>
               <th className="text-center px-2 py-1 font-semibold">{t("preparationReviewLabel")}</th>
@@ -700,43 +735,41 @@ export function PreparationReviewTable({
               // multiple items are Blocked they all share the single inline field —
               // anchored under the first blocked row, with a caption on the others.
               const blockedIds = items
-                .filter((it) => (draft[it.id]?.decision ?? "") === "Blocked")
+                .filter((it) => (draft[it.id] ?? "") === "Blocked")
                 .map((it) => it.id);
               const noteAnchorId = blockedIds[0] ?? null;
 
               return items.map((item) => {
-                const d = draft[item.id] ?? { decision: "", available: "", required: "" };
-                const isPartial = d.decision === "Partially Available";
+                const d = viewFor(item.id);
                 const isBlocked = d.decision === "Blocked";
-                const quantitiesEditable = canEdit && isPartial;
+                const s = stock[item.id];
                 return (
                   <Fragment key={item.id}>
                     <tr>
                       <td className="px-2 py-1.5">{item.beanTypeName}</td>
                       <td className="px-2 py-1.5 text-end font-medium">{item.quantityKg}</td>
-                      <td className="px-2 py-1.5 text-end">
-                        {quantitiesEditable ? (
-                          <input type="number" min="0" step="0.001" value={d.available}
-                            onChange={(e) => setItemQuantity(item.id, "available", e.target.value)}
-                            className="w-24 px-2 py-1.5 border-2 border-border rounded-lg text-xs text-end focus:border-orange focus:ring-2 focus:ring-orange/20 outline-none transition-colors" />
+                      <td className="px-2 py-1.5 text-end tabular-nums">
+                        {stockLoading && !s ? (
+                          <span className="text-brown/40">…</span>
+                        ) : s ? (
+                          <span className={s.freeToPromiseQty > 0 ? "text-green-600 font-semibold" : "text-brown/40"}>
+                            {s.freeToPromiseQty}
+                          </span>
                         ) : (
-                          <span>{d.available || "0"}</span>
+                          <span className="text-brown/40">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-1.5 text-end">
-                        {quantitiesEditable ? (
-                          <input type="number" min="0" step="0.001" value={d.required}
-                            onChange={(e) => setItemQuantity(item.id, "required", e.target.value)}
-                            className="w-24 px-2 py-1.5 border-2 border-border rounded-lg text-xs text-end focus:border-orange focus:ring-2 focus:ring-orange/20 outline-none transition-colors" />
-                        ) : (
-                          <span>{d.required || "0"}</span>
-                        )}
+                      <td className="px-2 py-1.5 text-end tabular-nums">
+                        <span className={isBlocked ? "text-brown/40" : undefined}>{isBlocked ? "0" : d.available || "0"}</span>
+                      </td>
+                      <td className="px-2 py-1.5 text-end tabular-nums">
+                        <span>{d.required || "0"}</span>
                       </td>
                       <td className="px-2 py-1.5 text-center">
                         {canEdit ? (
                           <select
                             value={d.decision}
-                            onChange={(e) => setItemDecision(item.id, e.target.value, item.quantityKg)}
+                            onChange={(e) => setItemDecision(item.id, e.target.value)}
                             className="px-2 py-1.5 border-2 border-border rounded-lg text-xs bg-white focus:border-orange focus:ring-2 focus:ring-orange/20 outline-none transition-colors"
                           >
                             {DECISION_OPTIONS.map((o) => (
@@ -750,7 +783,7 @@ export function PreparationReviewTable({
                     </tr>
                     {canEdit && isBlocked && item.id === noteAnchorId && (
                       <tr>
-                        <td colSpan={5} className="px-2 pb-2.5 pt-0.5 bg-oo-status-blocked-bg/40">
+                        <td colSpan={6} className="px-2 pb-2.5 pt-0.5 bg-oo-status-blocked-bg/40">
                           <div className="flex items-start gap-2">
                             <AlertTriangle size={14} className="text-oo-status-blocked mt-2 flex-shrink-0" aria-hidden="true" />
                             <div className="flex-1 min-w-0">
@@ -792,8 +825,8 @@ export function PreparationReviewTable({
 
       {canEdit && (
         <>
-          {partialMismatch && (
-            <p className="text-xs font-bold text-red-600">{t("prepPartialMismatch")}</p>
+          {(stockError || missingStock) && (
+            <p className="text-xs font-bold text-red-600">{t("stockPreviewUnavailable")}</p>
           )}
           <button
             onClick={handleSave}

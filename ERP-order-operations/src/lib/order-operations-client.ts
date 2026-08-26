@@ -50,12 +50,82 @@ export function describeApiError(error: ApiErrorInfo): string {
   }
 }
 
+export type PreparationDecisionValue =
+  | "Available on Shelf"
+  | "Needs Production"
+  | "Partially Available"
+  | "Blocked";
+
+// Quantities are no longer sent: the server reserves what the shelf can actually cover
+// and derives the split itself. `decision` is optional — omit it to accept whatever the
+// stock supports, or send one to assert an expectation the server will verify (and
+// reject with 409 if the shelf cannot back it).
 export type PreparationReviewItemInput = {
   orderItemId: string;
-  decision: "Available on Shelf" | "Needs Production" | "Partially Available" | "Blocked";
-  availableQuantity: number;
-  productionRequiredQuantity: number;
+  decision?: PreparationDecisionValue;
 };
+
+/** What can cover one order item right now. Mirrors GET /api/order-items/[id]/fulfillment-options. */
+export type FulfillmentOptions = {
+  orderItemId: string;
+  requiredQtyKg: number;
+  deliveredQty: number;
+  reservedQty: number;
+  outstandingQty: number;
+  freeToPromiseQty: number;
+  coverableFromShelfQty: number;
+  shortageQty: number;
+  matchingLots: {
+    id: string;
+    batchNumber: string;
+    availableQty: number;
+    reservedQty: number;
+    freeQty: number;
+  }[];
+};
+
+export async function fetchFulfillmentOptions(
+  orderItemId: string
+): Promise<ApiResult<FulfillmentOptions>> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/order-items/${orderItemId}/fulfillment-options`);
+  } catch {
+    return { ok: false, error: { status: 0, message: "Network error. Please check your connection and try again." } };
+  }
+  if (res.ok) return { ok: true, data: (await res.json()) as FulfillmentOptions };
+  let message = "Could not load stock availability.";
+  try {
+    const errBody = await res.json();
+    if (errBody && typeof errBody.error === "string") message = errBody.error;
+  } catch { /* non-JSON error body */ }
+  return { ok: false, error: { status: res.status, message } };
+}
+
+/**
+ * The decision the numbers support — the same rule the server applies, evaluated against
+ * the state a submission would LEAVE BEHIND rather than the state it starts from.
+ *
+ * The distinction matters for an item that is already covered: its outstanding demand is
+ * 0 and there is nothing left to cover, so judging on `coverableQty <= 0` alone would
+ * label a fully reserved item "Needs Production" — the opposite of both the stored value
+ * and what the server would record on a re-submit.
+ */
+export function derivePreparationDecision(
+  outstandingQty: number,
+  coverableQty: number,
+  alreadyReservedQty = 0
+): PreparationDecisionValue {
+  const willBeReserved = alreadyReservedQty + coverableQty;
+  const willStillNeed = Math.max(0, outstandingQty - coverableQty);
+  if (willStillNeed <= 0) return "Available on Shelf";
+  if (willBeReserved <= 0) return "Needs Production";
+  return "Partially Available";
+}
+
+/** Rounded to the repo-wide 3-decimal kg convention. Kept here so client components do
+ *  not have to import the server-side allocation service (and its Prisma types) to get it. */
+export const roundKg = (v: number): number => Number(v.toFixed(3));
 
 export type PreparationReviewResponse = {
   id: string;

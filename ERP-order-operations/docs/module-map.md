@@ -41,6 +41,7 @@ The ERP is a Next.js App Router monolith. All API routes live under `src/app/api
 | **Guard** | `requireModule("inventory")` |
 | **Sub-privileges** | `receive` (purchases), `adjust` (manual adjustments), `override` (price override) |
 | **Known gaps** | None for write paths. `GET /api/inventory-movements` has MVP safe limit: `take: 300` (pre-existing; not changed in R07 pass). |
+| **Shelf allocation (2026-08-26)** | `GET /api/finished-goods-lots` now also returns `reservedQty`. The Finished Goods tab shows Available / Reserved / Free per lot, and free-to-promise (`availableQty - reservedQty`) in the header. Still read-only — there is no manual finished-goods adjustment route. |
 
 ---
 
@@ -53,6 +54,7 @@ The ERP is a Next.js App Router monolith. All API routes live under `src/app/api
 | **Guard** | `requireModule("orders")` |
 | **Sub-privileges** | `create`, `edit`, `delete` |
 | **Known gaps** | `approvalStatus` and `paymentStatus` exist on the Order model and are shown in the UI edit form but are never written by any API route. All live orders have default values (`"Pending"` / `"Not Paid"`). Dedicated transition routes do not exist. The UI `updateOrder()` function is dead code. `GET /api/orders` has MVP safe limit: `take: 500`. Full cursor pagination deferred to Phase 2. |
+| **Shelf allocation (2026-08-26)** | `POST /api/orders` and `PUT /api/orders/[id]` no longer check green-bean stock alone. `checkOrderAvailability()` lets free shelf stock absorb each line first and charges only the remainder against green beans, so an order is no longer refused for want of raw coffee that is already roasted and packaged. `POST /api/orders/[id]/status` with `action: "cancel"` releases every shelf reservation the order held. |
 
 ---
 
@@ -102,6 +104,7 @@ The ERP is a Next.js App Router monolith. All API routes live under `src/app/api
 | **Guard** | `requireModule("dispatch")` (GET), `requireSub("dispatch", "mark_delivered")` (POST) |
 | **Sub-privileges** | `mark_delivered` |
 | **Known gaps** | None for write paths. `finishedGoodsLotId` is required for all new deliveries as of 2026-05-28; `POST /api/deliveries` rejects missing FGL with 400. `GET /api/deliveries` has MVP safe limit: `take: 500`. Full cursor pagination deferred to Phase 2. |
+| **Shelf allocation (2026-08-26)** | The eligibility rule changed. It previously measured packaged bags of roasting batches belonging to *this order item* and then deducted from whichever lot the operator picked — two guards about different kilograms, so a new order could never draw on a full shelf. It now caps the shipment at the item's undelivered quantity and consumes the lot through `consumeShelfStock()`, which draws down this item's own reservation first and only touches free stock for the remainder. A lot reserved for another order is refused with 409. The dispatch screen lists lots by free quantity, not gross available. |
 
 ---
 

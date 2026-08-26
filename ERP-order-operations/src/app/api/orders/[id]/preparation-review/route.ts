@@ -7,11 +7,17 @@ import {
   aggregatePreparationStatus,
   isPreparationDecision,
   PREPARATION_REVIEW_ENTRY_STATUSES,
-  validatePreparationQuantities,
-  roundKg,
   NOTE_MESSAGE_MAX_LENGTH,
   type PreparationDecision,
 } from "@/lib/services/order-operations";
+import {
+  ALLOCATABLE_ITEM_SELECT,
+  decisionFor,
+  kgEqual,
+  releaseShelfStock,
+  reserveShelfStock,
+  roundKg,
+} from "@/lib/services/shelf-allocation";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -24,7 +30,8 @@ type RawItem = {
 
 type ParsedItem = {
   orderItemId: string;
-  decision: PreparationDecision;
+  // null = "you work it out from stock". Non-null = a claim the server must be able to back.
+  decision: PreparationDecision | null;
   availableQuantity: number | null;
   productionRequiredQuantity: number | null;
 };
@@ -74,8 +81,12 @@ export async function POST(request: Request, { params }: Params) {
     }
     seenIds.add(raw.orderItemId);
 
-    const decisionValue = raw.decision;
-    if (!isPreparationDecision(decisionValue)) {
+    // The decision is now OPTIONAL. Omit it and the server derives it from real stock;
+    // send it and it is treated as a claim that must match what the shelf can back.
+    const decisionValue = raw.decision === undefined || raw.decision === null || raw.decision === ""
+      ? null
+      : raw.decision;
+    if (decisionValue !== null && !isPreparationDecision(decisionValue)) {
       return NextResponse.json(
         {
           error: `Invalid decision for item ${raw.orderItemId}. Must be one of: Available on Shelf, Needs Production, Partially Available, Blocked.`,
@@ -153,29 +164,92 @@ export async function POST(request: Request, { params }: Params) {
         }
       }
 
-      for (const p of parsedItems) {
-        const item = itemsById.get(p.orderItemId)!;
-        const validationError = validatePreparationQuantities(
-          p.decision,
-          item.quantityKg,
-          p.availableQuantity,
-          p.productionRequiredQuantity
-        );
-        if (validationError) {
-          throw { _appCode: 400, message: `Item ${p.orderItemId}: ${validationError}` };
-        }
-      }
+      // ── Shelf-first allocation ────────────────────────────────────────────
+      // The split between "already on the shelf" and "must be roasted" is no longer
+      // taken on trust from the request body. For every item the server reserves what
+      // the shelf can actually cover — atomically, so two reviews racing for the same
+      // kilograms cannot both win — and derives the decision from what it managed to
+      // hold. A decision supplied by the client is then only a claim, and a claim the
+      // stock cannot back is refused rather than silently stored.
+      const outcomes: {
+        orderItemId: string;
+        decision: PreparationDecision;
+        availableQuantity: number;
+        productionRequiredQuantity: number;
+        reservedFromLots: { lotId: string; batchNumber: string; quantityKg: number }[];
+      }[] = [];
 
       for (const p of parsedItems) {
-        await tx.orderItem.update({
+        const item = await tx.orderItem.findUniqueOrThrow({
           where: { id: p.orderItemId },
+          select: ALLOCATABLE_ITEM_SELECT,
+        });
+
+        // Re-reviewing an item starts from a clean slate: hand back what it holds, then
+        // take a fresh reservation against the shelf as it stands now.
+        await releaseShelfStock(tx, item.id);
+
+        const demand = roundKg(Math.max(0, item.quantityKg - item.deliveredQty));
+
+        // Blocked means "do not proceed with this item" — it must not sit on stock.
+        if (p.decision === "Blocked") {
+          outcomes.push({
+            orderItemId: item.id,
+            decision: "Blocked",
+            availableQuantity: 0,
+            productionRequiredQuantity: demand,
+            reservedFromLots: [],
+          });
+          continue;
+        }
+
+        const taken = await reserveShelfStock(tx, item, demand, user.id);
+        const reserved = taken.reservedKg;
+        const stillNeeded = roundKg(Math.max(0, demand - reserved));
+        const derived = decisionFor(stillNeeded, reserved) as PreparationDecision;
+
+        // A client-supplied decision is honoured only when the shelf agrees with it.
+        if (p.decision !== null && p.decision !== derived) {
+          throw {
+            _appCode: 409,
+            message:
+              `Item ${item.id}: "${p.decision}" is not supported by stock. ` +
+              `${reserved}kg of ${demand}kg can be covered from the shelf, so the decision is "${derived}".`,
+            computed: { orderItemId: item.id, decision: derived, availableQuantity: reserved, productionRequiredQuantity: stillNeeded },
+          };
+        }
+
+        // Quantities sent by the client are cross-checked, never trusted.
+        if (p.availableQuantity !== null && !kgEqual(p.availableQuantity, reserved)) {
+          throw {
+            _appCode: 409,
+            message: `Item ${item.id}: availableQuantity ${p.availableQuantity}kg does not match the ${reserved}kg actually available on the shelf.`,
+          };
+        }
+        if (p.productionRequiredQuantity !== null && !kgEqual(p.productionRequiredQuantity, stillNeeded)) {
+          throw {
+            _appCode: 409,
+            message: `Item ${item.id}: productionRequiredQuantity ${p.productionRequiredQuantity}kg does not match the ${stillNeeded}kg that must be produced.`,
+          };
+        }
+
+        outcomes.push({
+          orderItemId: item.id,
+          decision: derived,
+          availableQuantity: reserved,
+          productionRequiredQuantity: stillNeeded,
+          reservedFromLots: taken.lots,
+        });
+      }
+
+      for (const o of outcomes) {
+        await tx.orderItem.update({
+          where: { id: o.orderItemId },
           data: {
-            preparationDecision: p.decision,
-            // Stored at the same 3-decimal-place precision used to validate them, so the
-            // persisted row can never drift from what was actually checked above.
-            availableQuantity: p.availableQuantity === null ? null : roundKg(p.availableQuantity),
-            productionRequiredQuantity:
-              p.productionRequiredQuantity === null ? null : roundKg(p.productionRequiredQuantity),
+            preparationDecision: o.decision,
+            // Server-derived, at the repo-wide 3-decimal kg precision.
+            availableQuantity: o.availableQuantity,
+            productionRequiredQuantity: o.productionRequiredQuantity,
             // productionStatus, deliveryStatus, remainingQty intentionally omitted —
             // these remain system-derived (recalcOrderItemStatus) and must never be
             // written by preparation review.
@@ -208,11 +282,14 @@ export async function POST(request: Request, { params }: Params) {
         authorId: user.id,
         authorName: user.name,
         metadata: {
-          items: parsedItems.map((p) => ({
-            orderItemId: p.orderItemId,
-            decision: p.decision,
-            availableQuantity: p.availableQuantity,
-            productionRequiredQuantity: p.productionRequiredQuantity,
+          // The server-derived outcome, including which lots were actually reserved —
+          // the audit trail now records what the shelf gave, not what was typed.
+          items: outcomes.map((o) => ({
+            orderItemId: o.orderItemId,
+            decision: o.decision,
+            availableQuantity: o.availableQuantity,
+            productionRequiredQuantity: o.productionRequiredQuantity,
+            reservedFromLots: o.reservedFromLots,
           })),
         },
       });
@@ -248,8 +325,13 @@ export async function POST(request: Request, { params }: Params) {
     return NextResponse.json(result);
   } catch (err: unknown) {
     if (err && typeof err === "object" && "_appCode" in err) {
-      const e = err as { _appCode: number; message: string };
-      return NextResponse.json({ error: e.message }, { status: e._appCode });
+      const e = err as { _appCode: number; message: string; computed?: unknown };
+      // On a rejected claim the server hands back what it actually computed, so the
+      // review screen can correct itself without a second round trip.
+      return NextResponse.json(
+        e.computed === undefined ? { error: e.message } : { error: e.message, computed: e.computed },
+        { status: e._appCode }
+      );
     }
     return handlePrismaError(err);
   }

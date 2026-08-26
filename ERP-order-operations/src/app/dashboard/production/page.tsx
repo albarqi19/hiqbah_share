@@ -31,6 +31,8 @@ type CustomerPref = { id: string; greenBeanId: string; profileName: string; usag
 
 type OrderItem = {
   id: string; beanTypeName: string; quantityKg: number; productionStatus: string;
+  /** Kilograms preparation review covered from the shelf. Null until the review runs. */
+  availableQuantity: number | null;
   greenBeanId: string | null; greenBean: { id: string; beanType: string; quantityKg: number } | null;
   order: { orderNumber: number; customer: { name: string; roastPreferences: CustomerPref[] } };
   roastingBatches: { batchNumber: string; greenBeanQuantity: number; roastedBeanQuantity: number; isBlend: boolean }[];
@@ -126,8 +128,14 @@ export default function ProductionPage() {
   function startProduction(item: OrderItem) {
     setSelectedItem(item);
     const produced = item.roastingBatches.filter((b) => !b.isBlend).reduce((s: number, b) => s + b.greenBeanQuantity, 0);
-    const remaining = item.quantityKg - produced;
-    const cleanRemaining = Number(remaining.toFixed(3));
+    // Only the part the shelf could not cover needs roasting. Prefilling the full ordered
+    // quantity on a partially covered item hands the roaster a number the server will
+    // reject with 422, and roasting it anyway would produce exactly the surplus the shelf
+    // existed to avoid. availableQuantity is set by preparation review; before any review
+    // it is null and the whole order is still to be made.
+    const coveredFromShelf = item.availableQuantity ?? 0;
+    const remaining = item.quantityKg - coveredFromShelf - produced;
+    const cleanRemaining = Number(Math.max(0, remaining).toFixed(3));
     const pref = item.order.customer.roastPreferences?.find((p) => p.greenBeanId === item.greenBeanId);
     const profileHint = profileOverrides[item.id] ?? pref?.profileName ?? "";
     setRoastForm({ greenBeanId: item.greenBeanId || "", greenBeanQuantity: cleanRemaining, roastedBeanQuantity: 0, roastProfile: profileHint });
@@ -152,7 +160,9 @@ export default function ProductionPage() {
       const alreadyGreen = selectedItem.roastingBatches
         .filter((b) => !b.isBlend)
         .reduce((s, b) => s + b.greenBeanQuantity, 0);
-      const excess = +(alreadyGreen + roastForm.greenBeanQuantity - selectedItem.quantityKg).toFixed(2);
+      // Same ceiling the server enforces: ordered minus what the shelf already covers.
+      const ceiling = selectedItem.quantityKg - (selectedItem.availableQuantity ?? 0);
+      const excess = +(alreadyGreen + roastForm.greenBeanQuantity - ceiling).toFixed(2);
       if (excess > 0) {
         setOverproductionExcess(excess);
         return;

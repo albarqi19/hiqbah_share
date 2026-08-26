@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireSub } from "@/lib/auth-server";
 import { handlePrismaError } from "@/lib/api-error";
+import { releaseShelfStock } from "@/lib/services/shelf-allocation";
 import {
   appendOrderActivity,
   aggregatePreparationStatus,
@@ -116,6 +117,19 @@ export async function POST(request: Request, { params }: Params) {
           _appCode: 409,
           message: "Order status changed before this action could be applied. Please reload and retry.",
         };
+      }
+
+      // A cancelled order must stop holding shelf stock, otherwise its reservations sit
+      // there forever and quietly starve every other order of coffee that is physically
+      // present. Released rows are kept for audit rather than deleted.
+      if (action === "cancel") {
+        const cancelledItems = await tx.orderItem.findMany({
+          where: { orderId: id },
+          select: { id: true },
+        });
+        for (const item of cancelledItems) {
+          await releaseShelfStock(tx, item.id);
+        }
       }
 
       let message: string;

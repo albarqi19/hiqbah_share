@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireAnyModule, requireSub } from "@/lib/auth-server";
 import { handlePrismaError } from "@/lib/api-error";
 import { recalcOrderItemStatus } from "@/lib/services/order-fulfillment";
+import { reservedForItem } from "@/lib/services/shelf-allocation";
 import { recalcProductionOrderStatus } from "@/lib/services/production-planning";
 
 class AppError extends Error {
@@ -70,6 +71,18 @@ export async function POST(request: Request) {
   const data = await request.json();
   const { orderItemId, greenBeanId, greenBeanQuantity, roastedBeanQuantity, wasteQuantity, roastProfile, productionOrderId } = data;
 
+  // A direct roast must always name the green bean it consumes. Without it the whole
+  // stock-deduction + ledger block below is skipped, so roasted kilograms appear on the
+  // shelf while raw stock never moves and InventoryMovement has no matching OUT row.
+  // Blends are the deliberate exception and are created by /api/roasting-batches/blend,
+  // which composes already-roasted source batches and touches no green stock.
+  if (typeof greenBeanId !== "string" || !greenBeanId) {
+    return NextResponse.json(
+      { error: "greenBeanId is required — a roasting batch must consume a specific green bean lot." },
+      { status: 400 }
+    );
+  }
+
   const qty = Number(greenBeanQuantity);
   if (!Number.isFinite(qty) || qty <= 0) {
     return NextResponse.json({ error: "greenBeanQuantity must be a positive number." }, { status: 400 });
@@ -107,13 +120,30 @@ export async function POST(request: Request) {
     _sum: { greenBeanQuantity: true },
   });
 
+  // What this item is actually allowed to consume from the roaster: the ordered quantity
+  // minus whatever the shelf is already holding for it. Only the shortfall should ever be
+  // roasted — roasting the full ordered amount on top of reserved stock would produce the
+  // exact surplus the shelf was meant to absorb.
+  //
+  // Derived from live reservations rather than the stored productionRequiredQuantity on
+  // purpose. That column is written only by preparation review, so it goes stale the
+  // moment coverage moves (another order is cancelled and frees stock, a partial batch is
+  // packaged and claims some), and every value written before reservations existed came
+  // from a number a clerk typed with nothing behind it — trusting those would refuse
+  // legitimate roasts on historical rows, some of which carry a stored 0.
+  const alreadyReserved = await reservedForItem(prisma, orderItemId);
+  const productionCeiling = Math.max(0, +(surplusOrderItem.quantityKg - alreadyReserved).toFixed(3));
+
   const alreadyKg = existingAgg._sum.greenBeanQuantity ?? 0;
-  const excess = +(alreadyKg + qty - surplusOrderItem.quantityKg).toFixed(3);
+  const excess = +(alreadyKg + qty - productionCeiling).toFixed(3);
 
   if (excess > 0 && user.role !== "admin") {
     return NextResponse.json(
       {
-        error: `Batch would exceed the order quantity by ${excess}kg. Only an admin can authorize surplus production.`,
+        error:
+          alreadyReserved <= 0
+            ? `Batch would exceed the order quantity by ${excess}kg. Only an admin can authorize surplus production.`
+            : `Batch would exceed the ${productionCeiling}kg still to be produced for this item by ${excess}kg — ${alreadyReserved}kg is already covered from the shelf. Only an admin can authorize surplus production.`,
       },
       { status: 422 }
     );

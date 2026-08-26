@@ -22,11 +22,11 @@ This document tracks the path from current state to internal MVP launch for the 
 
 | | |
 |---|---|
-| **Date last updated** | 2026-05-29 |
+| **Date last updated** | 2026-08-26 |
 | **Phase 0 (Foundation)** | Complete |
 | **Phase 1 (Pre-MVP)** | In progress — Google Drive triage remains |
 | **Migration baseline** | Established 2026-05-22; three migrations tracked |
-| **Active migrations** | `20260522000000_baseline`, `20260526115344_add_qc_final_decision_reason`, `20260528084853_add_rate_limit` |
+| **Active migrations** | 11 tracked. Baseline through `20260801111404_add_order_operations_s0`, plus `20260826090000_add_shelf_allocation` (local test DB only — not yet deployed to demo or production). |
 | **Production deployment** | `prisma migrate deploy` in `package.json` build script |
 | **Open Go/No-Go blockers** | Google Drive triage |
 
@@ -157,6 +157,88 @@ The project has ERP-related TXT files stored in Google Drive. These may contain 
 - A dedicated review session must be explicitly scheduled — triage must not begin reactively mid-remediation.
 
 **Triage outcome (2026-05-28):** Google Drive ERP TXT controlled triage completed for MVP Go/No-Go. No MVP-blocking requirements were found. Periodic Inventory Count and QC Testing Waste Logging are formally deferred to Phase 2. All remaining Drive files are treated as future-state reference material unless later approved through a separate requirements intake process.
+
+---
+
+## 8b. Shelf-First Fulfilment — Delivered 2026-08-26
+
+> Scope note: this closes a set of defects in the existing order/inventory workflow. It adds
+> no new module and no new sub-privilege, and it does not change the MVP scope defined in
+> Section 4.
+
+The system tracked packaged roasted coffee (`FinishedGoodsLot`) but could not sell it to any
+order other than the one it was roasted for, and the split between "already on the shelf" and
+"must be roasted" was a number typed by a clerk that nothing verified. Seven defects were
+reproduced against a seeded database before any code changed, and each is now covered by an
+assertion in `scripts/e2e/`.
+
+| # | Defect | Resolution |
+|---|---|---|
+| D1 | `POST /api/deliveries` measured eligibility from the order item's own packaged batches but deducted from any product-matching lot — a full shelf was unsellable, and a passing delivery could reduce a lot the check never measured | Eligibility and deduction now speak about the same kilograms, via `consumeShelfStock()` |
+| D2 | Preparation review stored client-supplied `availableQuantity` / `productionRequiredQuantity` without ever reading stock | Both are server-derived; a client-supplied decision is a claim and is refused with 409 when stock cannot back it |
+| D3 | No reservation existed — N orders could all rely on the same kilograms, discovered only at shipping | `FinishedGoodsLot.reservedQty` + `StockAllocation`, taken under a conditional `UPDATE` |
+| D4 | The roasting surplus gate compared against the full ordered quantity, so an item covered from the shelf still queued a full-size roast | Ceiling is now `productionRequiredQuantity ?? quantityKg` |
+| D5 | Order creation checked green beans only and refused orders the shelf could fill | `checkOrderAvailability()` lets the shelf absorb each line first |
+| D6 | `greenBeanId` was optional on `POST /api/roasting-batches`, so a batch could consume no stock and write no ledger row | Rejected with 400. Blends are unaffected — they consume no green coffee by design |
+| D7 | `fulfillment-options` derived shortage from `remainingQty`, whose meaning changes mid-lifecycle | Returns explicit `outstandingQty` / `freeToPromiseQty` / `shortageQty`; `remainingQty` keeps its own meaning and is documented |
+
+**Also fixed:** both admin reset routes now delete `StockAllocation` before `FinishedGoodsLot`.
+Without it the `ON DELETE RESTRICT` foreign key aborts the entire reset transaction — verified
+by reverting the fix and watching `POST /api/admin/reset` return 409.
+
+### Adversarial review round
+
+The change was then reviewed across four lenses (concurrency, business-logic correctness,
+regression/backward-compatibility, and authorisation/UI truthfulness), with every claim
+independently verified before being accepted. 24 defects were raised and 18 survived
+verification. All 18 are closed. The ones worth recording:
+
+| Severity | Defect | Resolution |
+|---|---|---|
+| P0 | The dispatch lot picker filtered by free-to-promise, so a lot reserved to the very order being delivered was hidden — packaging reserves a batch's whole output to its own order, which drove that lot's free quantity to zero and made the ordinary roast → package → deliver path impossible from the UI | Dispatch now asks `GET /api/order-items/[id]/fulfillment-options`, which returns each lot's `deliverableQty` for that item (its own reservation plus free stock). Covered by the OWN-LOT scenario in `shelf-flow.mjs` |
+| P1 | `consumeShelfStock` checked the lot's aggregate `reservedQty`, so a concurrent release could let a delivery ship another order's reserved kilograms | The item's own allocation rows are now CLAIMED first with a guarded `updateMany`; only kilograms this transaction actually won are shipped against the promise |
+| P1 | The dispatch "ready for delivery" list still gated on the item's own packaged batches — the exact rule D1 removed from the server — so a shelf-covered order never appeared | The list now also admits items with shelf coverage |
+| P1 | An item reserving across several lots but delivered from one left the other reservations standing forever | `trimReservationToDemand()` runs after every delivery |
+| P1 | Deleting an order or a line cascaded `StockAllocation` away without decrementing `FinishedGoodsLot.reservedQty`, permanently inflating it | Both delete paths release first, inside a transaction |
+| P1 | The roasting ceiling read the stored `productionRequiredQuantity`, which goes stale and, for rows written before reservations existed, carries clerk-typed values — a stored `0` would have blocked production outright | The ceiling is derived live: ordered quantity minus what is actually reserved |
+| P1 | The production screen still prefilled and validated roasts against the full ordered quantity, guaranteeing a 422 on any partially covered item | Both now use ordered minus shelf coverage |
+| P1 | The review panel derived its decision from post-reservation numbers and showed "Needs Production" for an item that was already fully covered | `derivePreparationDecision` now evaluates the state a submission would leave behind, and takes the existing reservation into account |
+| P2 | Packaging re-reserved stock to cancelled and Blocked items, stranding it | The auto-reserve skips them |
+| P2 | The reservation guard compared a rounded JS figure against raw float columns and could silently skip a whole lot | Half a gram of tolerance on the column side of the comparison |
+| P2 | `reservedQty` defaulted to 0 for lots that were already packaged-but-undelivered, so a new order could reserve them away from the order that paid for the roast | Migration `20260826120000_backfill_shelf_reservations` claims each such lot for its own live order item. Idempotent, and it deliberately leaves cancelled orders' lots free |
+| P2 | A failed stock fetch left rows rendering as "Not Reviewed" while still being submitted | Save is refused when any included item has no stock data |
+
+**Verification:** `npx tsc --noEmit` exits 0; `npm run build` succeeds; eslint is at its
+pre-change count (47 problems, none in the changed files); 30/30 assertions in
+`shelf-flow.mjs`, 6/6 in `race.mjs` (six concurrent orders against a 10kg shelf — exactly
+one wins), 5/5 in `reset.mjs`. All three suites were also run against a database built from
+scratch — `prisma migrate deploy` then `npm run seed` — not only against an incrementally
+migrated one.
+
+**Accepted and not fixed:**
+
+- `checkOrderAvailability` at order-creation time counts the same free shelf for every
+  pending order, because nothing is reserved until preparation review. Two orders can
+  therefore both be accepted against stock that covers only one; the second is corrected at
+  review, which is where the reservation is actually taken. Reserving at creation would
+  hold stock for orders that may never be approved.
+- `decisionFor(0, 0)` labels a fully delivered item "Available on Shelf". It reads oddly but
+  is harmless — there is nothing outstanding to source either way.
+- The order form's "covered from shelf" preview matches on product only, while the
+  reservation also enforces SKU, so the preview can be optimistic for an order that names a
+  SKU. The server is authoritative and corrects it at review.
+
+**Known limitation, not a defect:** shelf pooling needs the coffee to be identifiable. It keys
+on `productId`, falling back to the order item's `greenBeanId`. Historical rows in this database
+have neither — all 44 seeded `OrderItem` rows have `productId`, `productSkuId` and `greenBeanId`
+all NULL, identified only by a free-text `beanTypeName` — so shelf-first cannot apply to them and
+they keep the old per-order behaviour. Both pickers are optional in the order form; making at
+least one of them required is the change that would extend shelf-first to everything, and it is a
+business decision rather than a bug.
+
+**Not in scope:** `RoastingBatch.orderItemId` remains required, so there is still no deliberate
+"roast to stock" path — the shelf fills only from surplus. A WIP layer for roasted-but-unpackaged
+coffee remains Gap 3 in `docs/inventory-ledger-coverage.md`.
 
 ---
 

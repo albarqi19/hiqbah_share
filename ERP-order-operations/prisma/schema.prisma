@@ -131,9 +131,14 @@ model OrderItem {
   // Written only by POST /api/orders/[id]/preparation-review — never by the
   // generic order edit route. Float to match quantityKg/deliveredQty/remainingQty
   // above — this model has no Decimal fields to stay consistent with.
+  // Since the shelf-allocation change these three are SERVER-DERIVED, never client
+  // supplied: availableQuantity is the sum of RESERVED StockAllocation rows for this
+  // item and productionRequiredQuantity is the outstanding remainder.
   preparationDecision        String? // Available on Shelf, Needs Production, Partially Available, Blocked
   availableQuantity          Float?
   productionRequiredQuantity Float?
+
+  allocations StockAllocation[]
 
   @@index([productionStatus])
   @@index([deliveryStatus])
@@ -459,11 +464,47 @@ model FinishedGoodsLot {
   roastingBatch   RoastingBatch? @relation(fields: [roastingBatchId], references: [id])
   quantityKg      Float
   availableQty    Float
+
+  // ─── Shelf allocation ────────────────────────────────────────────────────
+  // Kilograms already promised to an order item but not yet shipped. Denormalised
+  // sum of the RESERVED StockAllocation rows pointing at this lot — kept on the lot
+  // itself so "is there enough free stock" is answerable by a single conditional
+  // UPDATE (availableQty - reservedQty >= n), the same atomic pattern the delivery
+  // deduction already uses. Free-to-promise is always availableQty - reservedQty.
+  reservedQty     Float          @default(0)
+  allocations     StockAllocation[]
+
   status          LotStatus      @default(AVAILABLE)
   createdAt       DateTime       @default(now())
 
   @@index([status])
   @@index([createdAt])
+}
+
+enum AllocationStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+}
+
+// One order item may be covered by several lots, so the promise is a row per
+// (order item, lot) pair rather than a column on either side. RESERVED rows are the
+// detail behind FinishedGoodsLot.reservedQty; CONSUMED rows record what a delivery
+// actually shipped; RELEASED rows are cancelled promises kept for audit.
+model StockAllocation {
+  id                 String           @id @default(cuid())
+  orderItemId        String
+  orderItem          OrderItem        @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  finishedGoodsLotId String
+  finishedGoodsLot   FinishedGoodsLot @relation(fields: [finishedGoodsLotId], references: [id])
+  quantityKg         Float
+  status             AllocationStatus @default(RESERVED)
+  createdById        String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([orderItemId, status])
+  @@index([finishedGoodsLotId, status])
 }
 
 // ─── Product Catalog & Production Planning ────────────────────────────────────

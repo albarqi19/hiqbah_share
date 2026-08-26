@@ -93,6 +93,8 @@ export default function OrdersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [beans, setBeans] = useState<GreenBean[]>([]);
   const [products, setProducts] = useState<ProductSummary[]>([]);
+  // Free-to-promise kilograms on the shelf, per product id.
+  const [shelfByProduct, setShelfByProduct] = useState<Map<string, number>>(new Map());
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showForm, setShowForm] = useState(false);
@@ -111,32 +113,67 @@ export default function OrdersPage() {
   }, []);
 
   async function loadData() {
-    const [ordersRes, custRes, beansRes, productsRes] = await Promise.all([
+    const [ordersRes, custRes, beansRes, productsRes, lotsRes] = await Promise.all([
       fetch("/api/orders"), fetch("/api/customers"), fetch("/api/green-beans"),
       fetch("/api/coffee-products/summary"),
+      // The shelf counts towards what can be ordered, so the form has to know about it.
+      fetch("/api/finished-goods-lots"),
     ]);
     setOrders(await ordersRes.json());
     setCustomers(await custRes.json());
     setBeans(await beansRes.json());
     setProducts(await productsRes.json());
+    if (lotsRes.ok) {
+      const lots: { productId: string; availableQty: number; reservedQty: number; status: string }[] = await lotsRes.json();
+      const free = new Map<string, number>();
+      for (const l of lots) {
+        if (l.status !== "AVAILABLE") continue;
+        const f = l.availableQty - (l.reservedQty ?? 0);
+        if (f > 0) free.set(l.productId, (free.get(l.productId) ?? 0) + f);
+      }
+      setShelfByProduct(free);
+    }
   }
 
+  // Mirrors checkOrderAvailability on the server: the shelf absorbs what it can first
+  // and only the remainder is charged against green beans. Warning on green stock alone
+  // used to flag orders the roastery could in fact fill straight off the shelf.
   function getStockWarnings() {
-    const demandMap = new Map<string, number>();
-    for (const item of form.items) {
-      if (!item.greenBeanId || !item.quantityKg) continue;
-      demandMap.set(item.greenBeanId, (demandMap.get(item.greenBeanId) || 0) + item.quantityKg);
-    }
-    return form.items.map((item) => {
+    const shelfPool = new Map(shelfByProduct);
+    const greenDemand = new Map<string, number>();
+    const coveredByShelf: number[] = [];
+
+    form.items.forEach((item, idx) => {
+      let remaining = item.quantityKg || 0;
+      if (item.productId && remaining > 0) {
+        const pool = shelfPool.get(item.productId) ?? 0;
+        const cover = Math.min(remaining, pool);
+        if (cover > 0) {
+          shelfPool.set(item.productId, pool - cover);
+          remaining -= cover;
+        }
+        coveredByShelf[idx] = cover;
+      } else {
+        coveredByShelf[idx] = 0;
+      }
+      if (remaining > 0 && item.greenBeanId) {
+        greenDemand.set(item.greenBeanId, (greenDemand.get(item.greenBeanId) || 0) + remaining);
+      }
+    });
+
+    const warnings = form.items.map((item) => {
       if (!item.greenBeanId || !item.quantityKg) return null;
       const bean = beans.find((b) => b.id === item.greenBeanId);
       if (!bean) return null;
-      const totalDemand = demandMap.get(item.greenBeanId) || 0;
+      const totalDemand = greenDemand.get(item.greenBeanId) || 0;
       if (totalDemand > bean.quantityKg) {
-        return `${t("insufficientStock")} ${bean.quantityKg}kg, Total ordered: ${totalDemand}kg`;
+        return `${t("insufficientStock")} ${bean.quantityKg}kg, ${t("greenStillNeeded")}: ${totalDemand.toFixed(1)}kg`;
       }
       return null;
     });
+
+    // Pure: returns both halves rather than writing state during render.
+    return { warnings, coveredByShelf };
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -366,7 +403,7 @@ export default function OrdersPage() {
                   className="w-full px-3 py-2 border-2 border-border rounded-xl focus:border-orange focus:ring-2 focus:ring-orange/20 outline-none transition-colors" />
               </div>
               {(() => {
-                const warnings = getStockWarnings();
+                const { warnings, coveredByShelf } = getStockWarnings();
                 const hasStockError = warnings.some((w) => w !== null);
                 return (
                   <>
@@ -386,6 +423,16 @@ export default function OrdersPage() {
                             <input type="number" placeholder="kg" value={item.quantityKg || ""} onChange={(e) => updateItem(idx, "quantityKg", parseFloat(e.target.value) || 0)}
                               className="w-24 px-3 py-2 border-2 border-border rounded-xl text-sm focus:border-orange focus:ring-2 focus:ring-orange/20 outline-none transition-colors" required />
                           </div>
+                          {item.quantityKg > 0 && (coveredByShelf[idx] ?? 0) > 0 && (
+                            <p className="mt-1 text-xs font-semibold text-green-700">
+                              {t("shelfCoverageLabel")}: {(coveredByShelf[idx] ?? 0).toFixed(1)}kg
+                              {item.quantityKg - (coveredByShelf[idx] ?? 0) > 0 && (
+                                <span className="text-brown/60 font-medium">
+                                  {" "}— {t("toProduceLabel")}: {(item.quantityKg - (coveredByShelf[idx] ?? 0)).toFixed(1)}kg
+                                </span>
+                              )}
+                            </p>
+                          )}
                           <div className="flex gap-2 mt-1">
                             <select value={item.productId} onChange={(e) => {
                               updateItem(idx, "productId", e.target.value);
