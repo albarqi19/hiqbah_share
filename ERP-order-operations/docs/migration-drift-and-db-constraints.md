@@ -182,6 +182,25 @@ ALTER TABLE "StockAllocation" DROP CONSTRAINT IF EXISTS "StockAllocation_quantit
 
 ---
 
+## 3c. Nullable Column Widening (Roast to Stock)
+
+> **Status: APPLIED TO THE LOCAL TEST DATABASE ONLY.** Migration
+> `20260827090000_allow_roast_to_stock`.
+
+```sql
+ALTER TABLE "RoastingBatch" ALTER COLUMN "orderItemId" DROP NOT NULL;
+```
+
+No CHECK constraint and no backfill: every existing row already carries an order item, so the
+widening rewrites nothing.
+
+**Reversibility caveat.** Re-adding `SET NOT NULL` succeeds only while no stock batch exists.
+Once one has been created the reverse migration will fail, and the rows would have to be
+deleted or reassigned first. This is the intended one-way door — a stock batch is a batch that
+genuinely belongs to no order.
+
+---
+
 ## 4. Prisma Cannot Represent These CHECK Constraints
 
 Prisma's schema language (`schema.prisma`) has no `@check` or `@@check` attribute.

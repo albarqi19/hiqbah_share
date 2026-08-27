@@ -65,8 +65,9 @@ The ERP is a Next.js App Router monolith. All API routes live under `src/app/api
 | **Page** | `src/app/dashboard/production/page.tsx` |
 | **API routes** | `GET/POST /api/roasting-batches`, `GET/DELETE /api/roasting-batches/[id]`, `POST /api/roasting-batches/blend`, `PATCH /api/roasting-batches/[id]/date`, `GET/POST /api/roasting-batches/[id]/package` |
 | **Guard** | `requireModule("production")` |
-| **Sub-privileges** | `start_batch`, `blend`, `view_history`, `cancel_batch`, `edit_date` |
+| **Sub-privileges** | `start_batch`, `roast_to_stock`, `blend`, `view_history`, `cancel_batch`, `edit_date` |
 | **Known gaps** | Most batches have no `productionOrderId` — the production page UI sends none. `ProductionOrder` exists in the Prisma schema but has no dedicated API routes in MVP; batches are created through `/api/roasting-batches`. No approval/payment gate before production start. `GET /api/roasting-batches` has MVP safe limit: `take: 500`. Full cursor pagination deferred to Phase 2. |
+| **Roast to stock (2026-08-27)** | `RoastingBatch.orderItemId` is nullable. `POST /api/roasting-batches` with no `orderItemId` creates a **stock batch**: it requires `productId`, skips the per-order surplus gate (there is no order to exceed) and skips `recalcOrderItemStatus`. Packaging finds no owner, so the whole lot lands free-to-promise on the shelf. Gated on the sub-privilege `production.roast_to_stock`, separate from `start_batch`. Blending stock inputs produces a stock blend. |
 
 ---
 

@@ -147,8 +147,14 @@ model OrderItem {
 
 model RoastingBatch {
   id                  String         @id @default(cuid())
-  orderItemId         String
-  orderItem           OrderItem      @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  // Optional since roast-to-stock. A batch with no order item is a deliberate
+  // replenishment of the shelf: it consumes green stock and writes the same ledger
+  // entries as any other roast, but its packaged output is reserved to nobody and
+  // becomes free-to-promise for whichever order needs it first. Every batch created
+  // before this change carries an order item, and the order-driven path still sets one.
+  orderItemId         String?
+  orderItem           OrderItem?     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
   batchNumber         String
   date                DateTime       @default(now())
   greenBeanId         String?

@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireModule, requireSub } from "@/lib/auth-server";
 import { handlePrismaError } from "@/lib/api-error";
 import { recalcOrderItemStatus } from "@/lib/services/order-fulfillment";
-import { consumeShelfStock, roundKg, trimReservationToDemand } from "@/lib/services/shelf-allocation";
+import { consumeShelfStock, lotMatchFilter, roundKg, trimReservationToDemand } from "@/lib/services/shelf-allocation";
 
 export async function GET() {
   const { error } = await requireModule("dispatch");
@@ -65,27 +65,21 @@ export async function POST(request: Request) {
       if (finishedGoodsLotId) {
         const lot = await tx.finishedGoodsLot.findUnique({
           where: { id: finishedGoodsLotId },
-          select: {
-            id: true,
-            productId: true,
-            productSkuId: true,
-            roastingBatch: { select: { orderItemId: true } },
-          },
+          select: { id: true },
         });
         if (!lot) throw { _appCode: 404, message: "Finished goods lot not found." };
 
-        // Dual-path match: by product when the order item has one, otherwise by the
-        // batch this lot was packaged from (every RoastingBatch belongs to one OrderItem).
-        const productMatches = orderItem.productId
-          ? lot.productId === orderItem.productId
-          : lot.roastingBatch?.orderItemId === orderItem.id;
+        // Whether this lot may serve this order item is decided by lotMatchFilter — the
+        // same predicate the reservation path uses. Restating the rule here is how the two
+        // sides drifted apart once lotMatchFilter grew its green-bean tier: an order line
+        // naming a bean but no product could reserve a stock lot and then be refused
+        // delivery of it, stranding the coffee and deadlocking the order.
+        const matches = await tx.finishedGoodsLot.findFirst({
+          where: { id: finishedGoodsLotId, ...lotMatchFilter(orderItem) },
+          select: { id: true },
+        });
 
-        // SKU is only enforced when both sides specify one — legacy/incomplete rows
-        // with a null SKU on either side are not rejected on that basis alone.
-        const skuMatches =
-          !orderItem.productSkuId || !lot.productSkuId || lot.productSkuId === orderItem.productSkuId;
-
-        if (!productMatches || !skuMatches) {
+        if (!matches) {
           throw { _appCode: 409, message: "Selected finished goods lot does not match this order item." };
         }
       }

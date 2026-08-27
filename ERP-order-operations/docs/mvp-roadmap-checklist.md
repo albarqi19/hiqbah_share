@@ -26,7 +26,7 @@ This document tracks the path from current state to internal MVP launch for the 
 | **Phase 0 (Foundation)** | Complete |
 | **Phase 1 (Pre-MVP)** | In progress — Google Drive triage remains |
 | **Migration baseline** | Established 2026-05-22; three migrations tracked |
-| **Active migrations** | 11 tracked. Baseline through `20260801111404_add_order_operations_s0`, plus `20260826090000_add_shelf_allocation` (local test DB only — not yet deployed to demo or production). |
+| **Active migrations** | 13 tracked. Baseline through `20260801111404_add_order_operations_s0`, plus `20260826090000_add_shelf_allocation`, `20260826120000_backfill_shelf_reservations` and `20260827090000_allow_roast_to_stock` — all three on the local test DB only, not yet deployed to demo or production. |
 | **Production deployment** | `prisma migrate deploy` in `package.json` build script |
 | **Open Go/No-Go blockers** | Google Drive triage |
 
@@ -236,9 +236,73 @@ they keep the old per-order behaviour. Both pickers are optional in the order fo
 least one of them required is the change that would extend shelf-first to everything, and it is a
 business decision rather than a bug.
 
-**Not in scope:** `RoastingBatch.orderItemId` remains required, so there is still no deliberate
-"roast to stock" path — the shelf fills only from surplus. A WIP layer for roasted-but-unpackaged
-coffee remains Gap 3 in `docs/inventory-ledger-coverage.md`.
+**Not in scope at the time:** a WIP layer for roasted-but-unpackaged coffee remains Gap 3 in
+`docs/inventory-ledger-coverage.md`. The "roast to stock" limitation recorded here was lifted
+the following day — see Section 8c.
+
+---
+
+## 8c. Roast to Stock — Delivered 2026-08-27
+
+Shelf-first fulfilment let orders *consume* the shelf, but nothing could *fill* it on purpose:
+`RoastingBatch.orderItemId` was a required foreign key, so every roast had to name an order.
+The only stock that ever reached the shelf was accidental — an admin over-roasting against an
+order, or leftovers from a cancelled one. Half a mechanism.
+
+`orderItemId` is now nullable (migration `20260827090000_allow_roast_to_stock`, a widening
+`DROP NOT NULL` on 44 rows that all carry a value, so no backfill). A batch with no order item
+is a **stock batch**:
+
+- It consumes green stock and writes the same `OUT / RAW_MATERIAL` ledger entry as any roast.
+- It **must** name a `productId`. An order-backed batch can inherit its product from its order
+  item at packaging time; a stock batch has no order item, and a lot nothing can identify is a
+  lot no future order can be matched to.
+- At packaging there is no owner to reserve the output to, so the whole lot lands
+  free-to-promise. That is the entire point.
+- `recalcOrderItemStatus` is skipped; `qc-records/bulk-finalize` filters nulls out of its
+  order-item list; blending stock inputs produces a stock blend.
+
+**Authorisation.** Roasting to stock is deliberate surplus production — precisely what the
+per-order surplus gate exists to control — and that gate cannot apply, because there is no
+order to exceed. So it is gated on its own sub-privilege, `production.roast_to_stock`, rather
+than falling out of `start_batch`. `allEdit("production")` grants it, so admin and the roasting
+role keep it by default, but an admin can revoke it per employee. Verified: revoking it returns
+403 for a stock batch while ordinary order-backed roasting still works.
+
+**Verification:** `npx tsc --noEmit` exits 0; 18/18 assertions in `scripts/e2e/roast-to-stock.mjs`,
+with `shelf-flow.mjs` (30/30) and `race.mjs` (6/6) confirming no regression.
+
+### Adversarial review round
+
+Four lenses (nullable-FK reachability, stock-batch semantics, UI/authorisation, data safety).
+19 defects raised, 8 survived independent verification, all 8 closed. The ones worth recording:
+
+| Severity | Defect | Resolution |
+|---|---|---|
+| P0 | The reserving side and the shipping side disagreed about which lots serve an order item. `lotMatchFilter` had gained a green-bean tier; `POST /api/deliveries` still restated a two-tier rule of its own. An order line naming a bean but no product could **reserve** a stock lot and then be **refused delivery** of it — stock stranded, order deadlocked | The delivery route now calls `lotMatchFilter` instead of restating it. Two copies of a rule is how they drifted apart in the first place |
+| P1 | `roast_to_stock` was granted to the roasting role by default, which made the admin-only surplus gate circumventable by simply omitting the order item | `allEdit` gained an `except` list; the roasting role no longer receives it. An admin can still grant it per employee |
+| P1 | The privilege is deny-by-default on a *missing* key, so it would have shipped inert for every existing employee — including admins, who have no bypass | `scripts/permission-backfill.ts` now understands `adminOnly` keys: a brand-new capability backfills as `false` for everyone and `true` for admins, rather than the usual "edit ⇒ true" rule which would have granted it to exactly the people it is being withheld from. Verified against simulated live rows: admin `true`, roasting `false` |
+| P2 | Blending picked the blend's owner from `batches[0]` of an unordered `findMany`. With a stock batch in the selection, the same click could either orphan an order's production into free stock or claim stock for an order that never asked — decided by row order | Deterministic `orderBy`; mixed-ownership and multi-order selections are refused outright unless an `orderItemId` is named; **every** affected order item is recalculated, not just the winner |
+| P2 | A stock blend inherited no product, so it could never be packaged — the same invariant `POST /api/roasting-batches` enforces was dropped on the blend path | A stock blend must resolve to a single product across its inputs |
+| P2 | The blend modal showed nothing to distinguish a stock batch from an order-backed one | Each row now carries its owner (`#order` or `Stock`), and the client blocks the selection the server refuses |
+| P2 | The stock roast form did not require a green bean, and the resulting 400 rendered *behind* the modal's own backdrop, so the button simply looked dead | Both fields are required and reflected in the submit state; the modal renders its own errors |
+| P3 | The product picker was fed by an endpoint gated on the `orders` module while the feature is gated on production privileges — it rendered empty, silently, for a production-only user | `GET /api/coffee-products/summary` is now readable by `orders`, `production` or `packaging`. It is a name-and-id catalogue projection with no order or customer data in it |
+
+**Verification:** `npx tsc --noEmit` exits 0; `npm run build` succeeds; eslint at its pre-change
+count (47 problems, none in the changed files); **75 assertions pass** across five suites
+(`shelf-flow` 30, `roast-to-stock` 18, `race` 6, `pages` 16, `reset` 5) against a database built
+from scratch. `npm run e2e` now runs the first four.
+
+**A caught regression worth naming:** making `orderItemId` nullable exposed **46 unguarded
+dereferences** of `batch.orderItem` across the QC, packaging, production and cupping screens —
+every one of which would have crashed the moment a stock batch appeared in those queues.
+TypeScript could not see them because each page declared its own local type with `orderItem`
+non-optional. Making those types honest turned the whole class into compile errors. The
+API-level suites had all passed regardless: the break was in the browser, not the route.
+
+**Still not in scope:** `ProductionOrder` remains dead code — there is no planning layer, no
+minimum-stock level and no automatic replenishment. A stock roast is a human decision. The WIP
+layer for roasted-but-unpackaged coffee is still Gap 3.
 
 ---
 

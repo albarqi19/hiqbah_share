@@ -168,15 +168,19 @@ export async function PUT(
       });
 
       // ── Claim the packaged coffee for the order it was roasted for ──────────
-      // A batch always belongs to an order item, so the kilograms it just produced are
-      // spoken for. Reserving them here is what keeps the shelf honest: only the genuine
-      // surplus — coffee beyond what this order still needs — stays free for other
-      // orders to draw on, which is exactly what the orders screen already calls
-      // "surplus to inventory".
-      const owner = await tx.orderItem.findUnique({
-        where: { id: batch.orderItemId },
-        select: { ...ALLOCATABLE_ITEM_SELECT, preparationDecision: true, order: { select: { status: true } } },
-      });
+      // Reserving here is what keeps the shelf honest: only the genuine surplus — coffee
+      // beyond what this order still needs — stays free for other orders to draw on,
+      // which is exactly what the orders screen already calls "surplus to inventory".
+      //
+      // A stock batch has no order item at all. Nothing is reserved, so its whole output
+      // lands on the shelf free-to-promise — which is the entire point of roasting to
+      // stock, and the only way the shelf gets filled on purpose rather than by accident.
+      const owner = batch.orderItemId
+        ? await tx.orderItem.findUnique({
+            where: { id: batch.orderItemId },
+            select: { ...ALLOCATABLE_ITEM_SELECT, preparationDecision: true, order: { select: { status: true } } },
+          })
+        : null;
       // A cancelled or blocked order must not silently take stock back. Cancelling
       // releases its reservations; re-claiming them here for a batch that was already in
       // the roaster would strand the coffee on a dead order.
